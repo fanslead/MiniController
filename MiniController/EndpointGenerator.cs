@@ -64,7 +64,10 @@ public class EndpointGenerator : IIncrementalGenerator
                 else
                 {
                     // 如果没有提供RoutePrefix，则使用类名作为默认前缀
-                    routePrefix = $"/api/{classDecl.Identifier.ValueText.ToLowerInvariant()}";
+                    routePrefix = $"/api/{classDecl.Identifier.ValueText.ToLowerInvariant()
+                        .Replace("service", "")
+                        .Replace("controller", "")
+                        .Replace("endpoint", "")}";
                 }
 
                 // 获取可选参数
