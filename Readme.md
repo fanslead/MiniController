@@ -1,6 +1,6 @@
 # MiniController
 
-MiniController 是一个基于 Roslyn Source Generator 的 .NET 8/Standard 2.0 端点自动注册工具。它通过自定义特性（如 `MiniControllerAttribute`）自动生成分组端点注册扩展方法，简化 API 路由、授权、过滤器和响应类型的声明与维护。
+MiniController 是一个基于 Roslyn Source Generator 的 Standard 2.0 端点自动注册工具。它通过自定义特性（如 `MiniControllerAttribute`）自动生成分组端点注册扩展方法，简化 API 路由、授权、过滤器和响应类型的声明与维护。
 
 ## 特性
 
@@ -15,11 +15,11 @@ MiniController 是一个基于 Roslyn Source Generator 的 .NET 8/Standard 2.0 �
 
 1. **安装依赖**
 
-   项目依赖于 .NET 8 或 .NET Standard 2.0，确保你的项目环境满足要求。
+   项目依赖于.NET Standard 2.0，确保你的项目环境满足要求。
 
 2. **定义 MiniController**
 ``` csharp
-MiniController("/api/demo", Name = "DemoGroup")] 
+[MiniController("/api/demo", Name = "DemoGroup")] 
 public static class DemoController
  { 
     [HttpGet("hello")] 
