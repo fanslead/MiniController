@@ -18,7 +18,7 @@ public class EndpointGenerator : IIncrementalGenerator
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
 #if DEBUG
-        // Debugger.Launch(); // 启用调试器
+        //Debugger.Launch(); // 启用调试器
 #endif
         // 1. 筛选出带有MiniControllerAttribute的类
         var endpointGroupProvider = context.SyntaxProvider
@@ -408,15 +408,43 @@ public class EndpointGenerator : IIncrementalGenerator
 
     private string GetRouteTemplate(ISymbol methodSymbol, string httpMethod)
     {
+        // 1. 首先尝试从HTTP方法特性中获取路由模板
         foreach (var attr in methodSymbol.GetAttributes())
         {
-            if (attr.AttributeClass?.Name == $"Http{httpMethod}Attribute" &&
-                attr.ConstructorArguments.Length > 0 &&
-                attr.ConstructorArguments[0].Value is string template)
+            if (attr.AttributeClass?.Name == $"Http{httpMethod}Attribute" ||
+                attr.AttributeClass?.Name == $"{httpMethod}Attribute")
             {
-                return template;
+                // 获取路由模板（构造函数第一个参数）
+                if (attr.ConstructorArguments.Length > 0 &&
+                    attr.ConstructorArguments[0].Value is string template)
+                {
+                    return template;
+                }
             }
         }
+
+        // 2. 如果没有从特性中找到路由模板，则从方法名推断
+        var methodName = methodSymbol.Name;
+
+        // 确定前缀以推断路由
+        string[] prefixes = Array.Empty<string>();
+        switch (httpMethod)
+        {
+            case "Get": prefixes = new[] { "Get" }; break;
+            case "Post": prefixes = new[] { "Post", "Create", "Add" }; break;
+            case "Put": prefixes = new[] { "Put", "Update" }; break;
+            case "Delete": prefixes = new[] { "Delete", "Remove" }; break;
+            case "Patch": prefixes = new[] { "Patch" }; break;
+            case "Head": prefixes = new[] { "Head" }; break;
+            case "Options": prefixes = new[] { "Options" }; break;
+        }
+
+        if (prefixes.Length > 0 && prefixes.Any(p => methodName.StartsWith(p)))
+        {
+            return InferRouteFromMethodName(methodName, prefixes);
+        }
+
+        // 如果无法推断，则返回空字符串
         return string.Empty;
     }
 
