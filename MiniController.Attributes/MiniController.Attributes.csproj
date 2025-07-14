@@ -4,11 +4,11 @@
 		<TargetFramework>netstandard2.0</TargetFramework>
 		<langVersion>latest</langVersion>
 		<RootNamespace>MiniController</RootNamespace>
-		<AssemblyName>MiniController</AssemblyName>
+		<AssemblyName>MiniController.Attributes</AssemblyName>
 		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>1.0.0</Version>
+		<Version>1.0.1</Version>
 		<Authors>FunShow</Authors>
 		<Description>MiniController 是一个基于 Roslyn Source Generator 的 Standard 2.0 端点自动注册工具。它通过自定义特性（如 MiniControllerAttribute）自动生成分组端点注册扩展方法，简化Minimal API 路由、授权、过滤器和响应类型的声明与维护。</Description>
 		<PackageProjectUrl>https://github.com/fanslead/MiniController</PackageProjectUrl>
