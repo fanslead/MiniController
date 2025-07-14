@@ -13,7 +13,7 @@ public class EndpointGenerator : IIncrementalGenerator
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     { 
-        //Debugger.Launch(); // 启用调试器
+        Debugger.Launch(); // 启用调试器
         // 1. 筛选出带有MiniControllerAttribute的类
         var endpointGroupClasses = context.SyntaxProvider
             .CreateSyntaxProvider(
@@ -115,7 +115,8 @@ public class EndpointGenerator : IIncrementalGenerator
         var endpointMethods = new List<EndpointMethod>();
         foreach (var member in classDecl.Members)
         {
-            if (member is MethodDeclarationSyntax methodDecl)
+            if (member is MethodDeclarationSyntax methodDecl &&
+                methodDecl.Modifiers.Any(m => m.ValueText == "public"))
             {
                 var methodSymbol = model.GetDeclaredSymbol(methodDecl)!;
                 var methodAuthorize = ExtractMethodAuthorizeMetadata(methodSymbol);
