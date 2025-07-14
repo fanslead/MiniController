@@ -9,10 +9,4 @@ public class MiniControllerAttribute : Attribute
     }
 
     public string? RoutePrefix { get; }
-
-    public string? Name { get; set; }
-
-    public Type? FilterType { get; set; }
-
-    public string[]? Policies { get; set; }
 }
