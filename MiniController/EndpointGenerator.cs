@@ -1,6 +1,7 @@
 ﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
 
@@ -9,28 +10,42 @@ namespace MiniController;
 [Generator]
 public class EndpointGenerator : IIncrementalGenerator
 {
-    private readonly static List<(string nameSpace, string className)> ClassInfoList = [];
+    private readonly static ConcurrentBag<(string nameSpace, string className)> ClassInfoList = new();
+
+    private const string MiniControllerAttributeName = "MiniControllerAttribute";
+    private const string AuthorizeAttributeName = "AuthorizeAttribute";
+    private const string AllowAnonymousAttributeName = "AllowAnonymousAttribute";
+    private const string ApiExplorerSettingsAttributeName = "ApiExplorerSettingsAttribute";
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
-    { 
-        Debugger.Launch(); // 启用调试器
+    {
+#if DEBUG
+       // Debugger.Launch(); // 启用调试器
+#endif
         // 1. 筛选出带有MiniControllerAttribute的类
-        var endpointGroupClasses = context.SyntaxProvider
+        var endpointGroupProvider = context.SyntaxProvider
             .CreateSyntaxProvider(
                 predicate: (s, _) => IsEndpointGroupClass(s),
                 transform: (ctx, _) => GetEndpointGroupClass(ctx))
-            .Where(c => c is not null)!;
+            .Where(c => c is not null);
 
-        // 2. 生成代码
-        context.RegisterSourceOutput(endpointGroupClasses, (spc, endpointGroup) =>
-        {
-            GenerateEndpointRegistration(spc, endpointGroup!);
-        });
+        // 使用SelectMany将所有控制器信息合并为一个集合
+        var endpointGroupsCollection = endpointGroupProvider.Collect();
 
-        context.RegisterSourceOutput(context.CompilationProvider, (spc, _) =>
-        {
-            GenerateMiniControllerRegistration(spc, ClassInfoList.Distinct().ToList());
-        });
+        // 使用CompilationProvider和SelectMany创建源代码生成管道
+        var combinedProvider = context.CompilationProvider.Combine(endpointGroupsCollection);
+
+        // 2. 生成代码：为每个控制器生成扩展方法
+        context.RegisterImplementationSourceOutput(
+            endpointGroupProvider,
+            (spc, endpointGroup) => GenerateEndpointRegistration(spc, endpointGroup!)
+        );
+
+        // 3. 生成聚合注册方法
+        context.RegisterImplementationSourceOutput(
+            combinedProvider,
+            (spc, tuple) => GenerateMiniControllerRegistration(spc, [.. tuple.Right.Select(e => (e.Namespace, e.ClassName))])
+        );
     }
 
     private bool IsEndpointGroupClass(SyntaxNode node)
@@ -43,121 +58,179 @@ public class EndpointGenerator : IIncrementalGenerator
     {
         var classDecl = (ClassDeclarationSyntax)context.Node;
         var model = context.SemanticModel;
-        var classSymbol = model.GetDeclaredSymbol(classDecl)!;
+        var classSymbol = model.GetDeclaredSymbol(classDecl);
 
-        // 获取MiniControllerAttribute的RoutePrefix
-        var routePrefix = string.Empty;
-        string? groupName = null;
-        string? groupFilterType = null;
-        AuthorizeMetadata? groupAuthorize = null;
-        ApiExplorerSettingsMetadata? groupApiExplorerSettings = null;
-
-        foreach (var attr in classSymbol.GetAttributes())
+        if (classSymbol == null)
         {
-            if (attr.AttributeClass?.Name == "MiniControllerAttribute")
-            {
-                if (attr.ConstructorArguments.Length > 0 &&
-                    attr.ConstructorArguments[0].Value is string prefix)
-                {
-                    routePrefix = prefix;
-                }
-                else
-                {
-                    // 如果没有提供RoutePrefix，则使用类名作为默认前缀
-                    routePrefix = $"/api/{classDecl.Identifier.ValueText.ToLowerInvariant()
-                        .Replace("service", "")
-                        .Replace("controller", "")
-                        .Replace("endpoint", "")}";
-                }
-
-                // 获取可选参数
-                foreach (var namedArg in attr.NamedArguments)
-                {
-                    if (namedArg.Key == "Name" && namedArg.Value.Value is string name)
-                        groupName = name;
-
-                    if (namedArg.Key == "FilterType" &&
-                        namedArg.Value.Value is INamedTypeSymbol filterTypeSymbol)
-                    {
-                        groupFilterType = filterTypeSymbol.ToDisplayString();
-                    }
-                }
-
-                break;
-            }
-
-            // 检查类上的[Authorize]特性
-            if (attr.AttributeClass?.Name == "AuthorizeAttribute")
-            {
-                groupAuthorize = ExtractAuthorizeMetadata(attr);
-            }
-
-            // 检查类上的[AllowAnonymous]特性
-            if (attr.AttributeClass?.Name == "AllowAnonymousAttribute")
-            {
-                groupAuthorize =new AuthorizeMetadata
-                {
-                    AllowAnonymous = true
-                };
-            }
-
-            // 检查类上的[ApiExplorerSettings]特性
-            if (attr.AttributeClass?.Name == "ApiExplorerSettingsAttribute")
-            {
-                groupApiExplorerSettings = ExtractApiExplorerSettings(attr);
-            }
+            // 无法获取类符号，返回 null
+            return null;
         }
 
-        if (string.IsNullOrEmpty(routePrefix))
+        // 提取控制器级别的元数据
+        var controllerMetadata = ExtractControllerMetadata(classSymbol, classDecl);
+        if (string.IsNullOrEmpty(controllerMetadata.RoutePrefix))
             return null;
 
         // 收集类中的端点方法
+        var endpointMethods = CollectEndpointMethods(classDecl, model, controllerMetadata);
+
+        // 创建并返回 EndpointGroupClass
+        return new EndpointGroupClass
+        {
+            Namespace = classSymbol.ContainingNamespace.ToString(),
+            ClassName = classDecl.Identifier.ValueText,
+            RoutePrefix = controllerMetadata.RoutePrefix,
+            Name = controllerMetadata.GroupName,
+            FilterType = controllerMetadata.FilterType,
+            Authorize = controllerMetadata.Authorize,
+            EndpointMethods = endpointMethods
+        };
+    }
+
+    /// <summary>
+    /// 提取控制器级别的元数据
+    /// </summary>
+    private ControllerMetadata ExtractControllerMetadata(ISymbol classSymbol, ClassDeclarationSyntax classDecl)
+    {
+        var metadata = new ControllerMetadata();
+
+        foreach (var attr in classSymbol.GetAttributes())
+        {
+            if (attr.AttributeClass?.Name == MiniControllerAttributeName)
+            {
+                metadata.RoutePrefix = ExtractRoutePrefix(attr, classDecl);
+                metadata.GroupName = ExtractGroupName(attr);
+                metadata.FilterType = ExtractControllerFilterType(attr);
+            }
+            else if (attr.AttributeClass?.Name == AuthorizeAttributeName)
+            {
+                metadata.Authorize = ExtractAuthorizeMetadata(attr);
+            }
+            else if (attr.AttributeClass?.Name == AllowAnonymousAttributeName)
+            {
+                metadata.Authorize = new AuthorizeMetadata { AllowAnonymous = true };
+            }
+            else if (attr.AttributeClass?.Name == ApiExplorerSettingsAttributeName)
+            {
+                metadata.ApiExplorerSettings = ExtractApiExplorerSettings(attr);
+            }
+        }
+
+        return metadata;
+    }
+
+    /// <summary>
+    /// 提取路由前缀
+    /// </summary>
+    private string ExtractRoutePrefix(AttributeData attr, ClassDeclarationSyntax classDecl)
+    {
+        // 从构造函数参数中获取路由前缀
+        if (attr.ConstructorArguments.Length > 0 &&
+            attr.ConstructorArguments[0].Value is string prefix)
+        {
+            return prefix;
+        }
+
+        // 如果没有提供前缀，则根据类名生成默认前缀
+        return $"/api/{classDecl.Identifier.ValueText.ToLowerInvariant()
+            .Replace("service", "")
+            .Replace("controller", "")
+            .Replace("endpoint", "")}";
+    }
+
+    /// <summary>
+    /// 提取组名称
+    /// </summary>
+    private string? ExtractGroupName(AttributeData attr)
+    {
+        foreach (var namedArg in attr.NamedArguments)
+        {
+            if (namedArg.Key == "Name" && namedArg.Value.Value is string name)
+                return name;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 提取控制器级过滤器类型
+    /// </summary>
+    private string? ExtractControllerFilterType(AttributeData attr)
+    {
+        foreach (var namedArg in attr.NamedArguments)
+        {
+            if (namedArg.Key == "FilterType" &&
+                namedArg.Value.Value is INamedTypeSymbol filterTypeSymbol)
+            {
+                return filterTypeSymbol.ToDisplayString();
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 收集类中的端点方法
+    /// </summary>
+    private List<EndpointMethod> CollectEndpointMethods(
+        ClassDeclarationSyntax classDecl,
+        SemanticModel model,
+        ControllerMetadata controllerMetadata)
+    {
         var endpointMethods = new List<EndpointMethod>();
+
         foreach (var member in classDecl.Members)
         {
             if (member is MethodDeclarationSyntax methodDecl &&
                 methodDecl.Modifiers.Any(m => m.ValueText == "public"))
             {
-                var methodSymbol = model.GetDeclaredSymbol(methodDecl)!;
-                var methodAuthorize = ExtractMethodAuthorizeMetadata(methodSymbol);
-                var responseTypes = ExtractResponseTypes(methodSymbol);
-                var methodApiExplorerSettings = ExtractMethodApiExplorerSettings(methodSymbol);
-                var httpMethodInfo = GetHttpMethodInfo(methodSymbol);
+                var methodSymbol = model.GetDeclaredSymbol(methodDecl);
+                if (methodSymbol == null) continue;
 
-                // 合并类和方法级的授权（方法级覆盖类级）
-                var effectiveAuthorize = MergeAuthorizeMetadata(groupAuthorize, methodAuthorize);
-
-                // 合并类和方法级的ApiExplorerSettings（方法级覆盖类级）
-                var effectiveApiExplorerSettings = MergeApiExplorerSettings(
-                    groupApiExplorerSettings,
-                    methodApiExplorerSettings
-                );
-
-                if (httpMethodInfo != null)
+                var endpointMethod = ProcessEndpointMethod(methodSymbol, methodDecl, controllerMetadata);
+                if (endpointMethod != null)
                 {
-                    endpointMethods.Add(new EndpointMethod
-                    {
-                        Name = methodDecl.Identifier.ValueText,
-                        HttpMethod = httpMethodInfo.Value.HttpMethod,
-                        RouteTemplate = GetRouteTemplate(methodSymbol, httpMethodInfo.Value.HttpMethod),
-                        FilterType = GetFilterType(methodSymbol, httpMethodInfo.Value.HttpMethod),
-                        Authorize = effectiveAuthorize,
-                        ResponseTypes = responseTypes,
-                        ApiExplorerSettings = effectiveApiExplorerSettings
-                    });
+                    endpointMethods.Add(endpointMethod);
                 }
             }
         }
 
-        return new EndpointGroupClass
+        return endpointMethods;
+    }
+
+    /// <summary>
+    /// 处理单个端点方法
+    /// </summary>
+    private EndpointMethod? ProcessEndpointMethod(
+        ISymbol methodSymbol,
+        MethodDeclarationSyntax methodDecl,
+        ControllerMetadata controllerMetadata)
+    {
+        // 提取方法级元数据
+        var methodAuthorize = ExtractMethodAuthorizeMetadata(methodSymbol);
+        var responseTypes = ExtractResponseTypes(methodSymbol);
+        var methodApiExplorerSettings = ExtractMethodApiExplorerSettings(methodSymbol);
+        var httpMethodInfo = GetHttpMethodInfo(methodSymbol);
+
+        if (httpMethodInfo == null)
+            return null;
+
+        // 合并类和方法级的授权和API浏览器设置
+        var effectiveAuthorize = MergeAuthorizeMetadata(controllerMetadata.Authorize, methodAuthorize);
+        var effectiveApiExplorerSettings = MergeApiExplorerSettings(
+            controllerMetadata.ApiExplorerSettings,
+            methodApiExplorerSettings
+        );
+
+        return new EndpointMethod
         {
-            Namespace = classSymbol.ContainingNamespace.ToString(),
-            ClassName = classDecl.Identifier.ValueText,
-            RoutePrefix = routePrefix,
-            Name = groupName,
-            FilterType = groupFilterType,
-            Authorize = groupAuthorize,
-            EndpointMethods = endpointMethods
+            Name = methodDecl.Identifier.ValueText,
+            HttpMethod = httpMethodInfo.Value.HttpMethod,
+            RouteTemplate = GetRouteTemplate(methodSymbol, httpMethodInfo.Value.HttpMethod),
+            FilterType = GetFilterType(methodSymbol, httpMethodInfo.Value.HttpMethod),
+            Authorize = effectiveAuthorize,
+            ResponseTypes = responseTypes,
+            ApiExplorerSettings = effectiveApiExplorerSettings
         };
     }
 
@@ -177,7 +250,6 @@ public class EndpointGenerator : IIncrementalGenerator
     {
         bool? ignoreApi = null;
         string? groupName = null;
-        int? order = null;
 
         foreach (var namedArg in attr.NamedArguments)
         {
@@ -186,12 +258,9 @@ public class EndpointGenerator : IIncrementalGenerator
 
             if (namedArg.Key == "GroupName" && namedArg.Value.Value is string name)
                 groupName = name;
-
-            if (namedArg.Key == "Order" && namedArg.Value.Value is int ord)
-                order = ord;
         }
 
-        if (ignoreApi == null && groupName == null && order == null)
+        if (ignoreApi == null && groupName == null)
             return null;
 
         return new ApiExplorerSettingsMetadata
@@ -243,7 +312,99 @@ public class EndpointGenerator : IIncrementalGenerator
             }
         }
 
+        // 如果没有 HTTP 方法特性，则根据方法名称推断
+        var methodName = methodSymbol.Name;
+
+        // 根据方法名称前缀推断 HTTP 方法
+        if (methodName.StartsWith("Get"))
+        {
+            return ("Get", InferRouteFromMethodName(methodName, "Get"));
+        }
+        else if (methodName.StartsWith("Post") || methodName.StartsWith("Create") || methodName.StartsWith("Add"))
+        {
+            return ("Post", InferRouteFromMethodName(methodName, ["Post", "Create", "Add"]));
+        }
+        else if (methodName.StartsWith("Put") || methodName.StartsWith("Update"))
+        {
+            return ("Put", InferRouteFromMethodName(methodName, ["Put", "Update"]));
+        }
+        else if (methodName.StartsWith("Delete") || methodName.StartsWith("Remove"))
+        {
+            return ("Delete", InferRouteFromMethodName(methodName, ["Delete", "Remove"]));
+        }
+        else if (methodName.StartsWith("Patch"))
+        {
+            return ("Patch", InferRouteFromMethodName(methodName, "Patch"));
+        }
+        else if (methodName.StartsWith("Head"))
+        {
+            return ("Head", InferRouteFromMethodName(methodName, "Head"));
+        }
+        else if (methodName.StartsWith("Options"))
+        {
+            return ("Options", InferRouteFromMethodName(methodName, "Options"));
+        }
+
+        // 如果方法名称不符合任何模式，则返回 null
         return null;
+    }
+
+    /// <summary>
+    /// 根据方法名称推断路由模板
+    /// </summary>
+    private string InferRouteFromMethodName(string methodName, string prefix)
+    {
+        return InferRouteFromMethodName(methodName, new[] { prefix });
+    }
+
+    /// <summary>
+    /// 根据方法名称推断路由模板，支持多个前缀
+    /// </summary>
+    private string InferRouteFromMethodName(string methodName, string[] prefixes)
+    {
+        string routeName = methodName;
+
+        // 移除方法名称前缀
+        foreach (var prefix in prefixes)
+        {
+            if (routeName.StartsWith(prefix))
+            {
+                routeName = routeName.Substring(prefix.Length);
+                break;
+            }
+        }
+
+        // 如果移除前缀后为空，则返回空路由
+        if (string.IsNullOrEmpty(routeName))
+        {
+            return string.Empty;
+        }
+
+        // 确保第一个字符小写
+        routeName = char.ToLowerInvariant(routeName[0]) + routeName.Substring(1);
+
+        // 转换为 kebab-case 格式
+        var kebabCase = string.Empty;
+        for (int i = 0; i < routeName.Length; i++)
+        {
+            var c = routeName[i];
+            if (i > 0 && char.IsUpper(c))
+            {
+                kebabCase += "-" + char.ToLowerInvariant(c);
+            }
+            else
+            {
+                kebabCase += char.ToLowerInvariant(c);
+            }
+        }
+
+        // 移除末尾的"Async"（如果有）
+        if (kebabCase.EndsWith("-async"))
+        {
+            kebabCase = kebabCase.Substring(0, kebabCase.Length - 6);
+        }
+
+        return kebabCase;
     }
 
     private string GetRouteTemplate(ISymbol methodSymbol, string httpMethod)
@@ -284,11 +445,11 @@ public class EndpointGenerator : IIncrementalGenerator
     {
         foreach (var attr in methodSymbol.GetAttributes())
         {
-            if (attr.AttributeClass?.Name == "AuthorizeAttribute")
+            if (attr.AttributeClass?.Name == AuthorizeAttributeName)
             {
                 return ExtractAuthorizeMetadata(attr);
             }
-            if (attr.AttributeClass?.Name == "AllowAnonymousAttribute")
+            if (attr.AttributeClass?.Name == AllowAnonymousAttributeName)
             {
                 return new AuthorizeMetadata
                 {
@@ -642,5 +803,18 @@ public class ResponseTypeMetadata
 public class ApiExplorerSettingsMetadata
 {
     public bool? IgnoreApi { get; set; }
+
     public string? GroupName { get; set; }
+}
+
+/// <summary>
+/// 用于存储控制器级元数据的内部类
+/// </summary>
+public class ControllerMetadata
+{
+    public string RoutePrefix { get; set; } = string.Empty;
+    public string? GroupName { get; set; }
+    public string? FilterType { get; set; }
+    public AuthorizeMetadata? Authorize { get; set; }
+    public ApiExplorerSettingsMetadata? ApiExplorerSettings { get; set; }
 }
