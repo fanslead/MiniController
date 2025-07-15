@@ -2,6 +2,24 @@
 
 MiniController 是一个基于 Roslyn Source Generator 的 .NET Standard 2.0 端点自动注册工具。它通过自定义特性（如 `MiniControllerAttribute`）自动生成分组端点注册扩展方法，简化 Minimal API 路由、授权、过滤器和响应类型的声明与维护。
 
+**传统传统Web API和Minimal API比较**
+| **场景**                  | **传统Web API**                  | **Minimal API**                  |
+|---------------------------|----------------------------------|----------------------------------|
+| 大型复杂项目              | ✅ 更好的代码组织和可维护性       | ❌ 路由逻辑集中导致Program.cs膨胀 |
+| 小型服务/快速原型         | ❌ 模板代码较多                   | ✅ 代码简洁，开发效率高           |
+| 需要丰富的框架特性        | ✅ 完整支持过滤器、模型验证等     | ❌ 部分功能需要手动实现           |
+| 微服务/无服务器应用       | ❌ 启动时间较长                   | ✅ 轻量级，启动快                 |
+
+| **特性**               | **传统Web API**                     | **Minimal API**                     |
+|------------------------|-------------------------------------|-------------------------------------|
+| **路由定义**           | 基于控制器和属性路由                | 基于链式方法和lambda表达式          |
+| **代码结构**           | 结构化，适合大型项目                | 扁平化，适合小型项目                |
+| **灵活性**             | 依赖框架约定                        | 高度自定义                          |
+| **学习曲线**           | 较高（需理解MVC模式）               | 较低（无需控制器概念）              |
+
+
+本项目结合两者优势，拥有传统WebAPI的写法体验以及Minimal API的性能优势。
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![NuGet Version](https://img.shields.io/nuget/v/MiniController.svg)](https://www.nuget.org/packages/MiniController)
 [![.NET Standard](https://img.shields.io/badge/.NET%20Standard-2.0-blue.svg)](https://docs.microsoft.com/en-us/dotnet/standard/net-standard)
