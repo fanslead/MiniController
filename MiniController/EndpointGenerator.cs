@@ -2,7 +2,6 @@
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Text;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Text;
 
 namespace MiniController;
@@ -10,17 +9,33 @@ namespace MiniController;
 [Generator(LanguageNames.CSharp)]
 public class EndpointGenerator : IIncrementalGenerator
 {
+    // 使用静态只读集合提高性能
+    private static readonly HashSet<string> HttpAttributeNames = new(StringComparer.Ordinal)
+    {
+        "HttpGetAttribute", "HttpPostAttribute", "HttpPutAttribute",
+        "HttpDeleteAttribute", "HttpPatchAttribute", "HttpHeadAttribute", "HttpOptionsAttribute"
+    };
+
+    private static readonly string[] HttpMethodPrefixes =
+    {
+        "Get", "Post", "Put", "Delete", "Patch", "Head", "Options"
+    };
+
+    // 优化缓存键的生成，避免字符串拼接
+    private static readonly ConcurrentDictionary<string, string> RouteNameCache = new();
+    private static readonly ConcurrentDictionary<(string methodName, string prefixes), string> KebabCaseCache = new();
+
     private const string MiniControllerAttributeName = "MiniControllerAttribute";
     private const string AuthorizeAttributeName = "AuthorizeAttribute";
     private const string AllowAnonymousAttributeName = "AllowAnonymousAttribute";
     private const string ApiExplorerSettingsAttributeName = "ApiExplorerSettingsAttribute";
+    private const string ProducesResponseTypeAttributeName = "ProducesResponseTypeAttribute";
 
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
 #if DEBUG
         //Debugger.Launch(); // 启用调试器
 #endif
-        // 1. 筛选出带有MiniControllerAttribute的类
         var endpointGroupProvider = context.SyntaxProvider
             .CreateSyntaxProvider(
                 predicate: (s, _) => IsEndpointGroupClass(s),
@@ -28,30 +43,40 @@ public class EndpointGenerator : IIncrementalGenerator
             .WithTrackingName("EndpointGroupProvider")
             .Where(c => c is not null);
 
-        // 使用SelectMany将所有控制器信息合并为一个集合
         var endpointGroupsCollection = endpointGroupProvider.Collect();
 
-        // 使用CompilationProvider和SelectMany创建源代码生成管道
-        var combinedProvider = context.CompilationProvider.Combine(endpointGroupsCollection);
+        var combinedProvider = endpointGroupProvider.Combine(endpointGroupsCollection);
 
-        // 2. 生成代码：为每个控制器生成扩展方法
         context.RegisterImplementationSourceOutput(
             endpointGroupProvider,
             (spc, endpointGroup) => GenerateEndpointRegistration(spc, endpointGroup!)
         );
 
-        // 3. 生成聚合注册方法
         context.RegisterImplementationSourceOutput(
             combinedProvider,
-            (spc, tuple) => GenerateMiniControllerRegistration(spc, [.. tuple.Right.Select(e => (e.Namespace, e.ClassName))])
+            (spc, tuple) => GenerateMiniControllerRegistration(spc, tuple.Right.Select(e => (e.Namespace, e.ClassName)).ToList())
         );
     }
 
-    private bool IsEndpointGroupClass(SyntaxNode node)
-        => node is ClassDeclarationSyntax classDecl &&
-           classDecl.AttributeLists.Any(attrList =>
-               attrList.Attributes.Any(attr =>
-                   attr.Name.ToString() == "MiniController"));
+    private static bool IsEndpointGroupClass(SyntaxNode node)
+    {
+        if (node is not ClassDeclarationSyntax classDecl)
+            return false;
+
+        foreach (var attrList in classDecl.AttributeLists)
+        {
+            foreach (var attr in attrList.Attributes)
+            {
+                var attrName = attr.Name.ToString().AsSpan();
+                if (attrName.Equals("MiniController".AsSpan(), StringComparison.Ordinal) ||
+                    attrName.Equals("MiniControllerAttribute".AsSpan(), StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
 
     private EndpointGroupClass? GetEndpointGroupClass(GeneratorSyntaxContext context)
     {
@@ -61,19 +86,18 @@ public class EndpointGenerator : IIncrementalGenerator
 
         if (classSymbol == null)
         {
-            // 无法获取类符号，返回 null
             return null;
         }
 
-        // 提取控制器级别的元数据
         var controllerMetadata = ExtractControllerMetadata(classSymbol, classDecl);
         if (string.IsNullOrEmpty(controllerMetadata.RoutePrefix))
             return null;
 
-        // 收集类中的端点方法
         var endpointMethods = CollectEndpointMethods(classDecl, model, controllerMetadata);
 
-        // 创建并返回 EndpointGroupClass
+        if (endpointMethods.Count == 0)
+            return null;
+
         return new EndpointGroupClass
         {
             Namespace = classSymbol.ContainingNamespace.ToString(),
@@ -86,61 +110,57 @@ public class EndpointGenerator : IIncrementalGenerator
         };
     }
 
-    /// <summary>
-    /// 提取控制器级别的元数据
-    /// </summary>
     private ControllerMetadata ExtractControllerMetadata(ISymbol classSymbol, ClassDeclarationSyntax classDecl)
     {
         var metadata = new ControllerMetadata();
 
         foreach (var attr in classSymbol.GetAttributes())
         {
-            if (attr.AttributeClass?.Name == MiniControllerAttributeName)
+            var attrName = attr.AttributeClass?.Name;
+            if (attrName == null) continue;
+
+            switch (attrName)
             {
-                metadata.RoutePrefix = ExtractRoutePrefix(attr, classDecl);
-                metadata.GroupName = ExtractGroupName(attr);
-                metadata.FilterType = ExtractControllerFilterType(attr);
-            }
-            else if (attr.AttributeClass?.Name == AuthorizeAttributeName)
-            {
-                metadata.Authorize = ExtractAuthorizeMetadata(attr);
-            }
-            else if (attr.AttributeClass?.Name == AllowAnonymousAttributeName)
-            {
-                metadata.Authorize = new AuthorizeMetadata { AllowAnonymous = true };
-            }
-            else if (attr.AttributeClass?.Name == ApiExplorerSettingsAttributeName)
-            {
-                metadata.ApiExplorerSettings = ExtractApiExplorerSettings(attr);
+                case MiniControllerAttributeName:
+                    metadata.RoutePrefix = ExtractRoutePrefix(attr, classDecl);
+                    metadata.GroupName = ExtractGroupName(attr);
+                    metadata.FilterType = ExtractControllerFilterType(attr);
+                    break;
+                case AuthorizeAttributeName:
+                    metadata.Authorize = ExtractAuthorizeMetadata(attr);
+                    break;
+                case AllowAnonymousAttributeName:
+                    metadata.Authorize = new AuthorizeMetadata { AllowAnonymous = true };
+                    break;
+                case ApiExplorerSettingsAttributeName:
+                    metadata.ApiExplorerSettings = ExtractApiExplorerSettings(attr);
+                    break;
             }
         }
 
         return metadata;
     }
 
-    /// <summary>
-    /// 提取路由前缀
-    /// </summary>
     private string ExtractRoutePrefix(AttributeData attr, ClassDeclarationSyntax classDecl)
     {
-        // 从构造函数参数中获取路由前缀
         if (attr.ConstructorArguments.Length > 0 &&
             attr.ConstructorArguments[0].Value is string prefix)
         {
             return prefix;
         }
 
-        // 如果没有提供前缀，则根据类名生成默认前缀
-        return $"/api/{classDecl.Identifier.ValueText.ToLowerInvariant()
-            .Replace("service", "")
-            .Replace("controller", "")
-            .Replace("endpoint", "")}";
+        var className = classDecl.Identifier.ValueText;
+        return RouteNameCache.GetOrAdd(className, static name =>
+        {
+            var processedName = name.ToLowerInvariant()
+                .Replace("service", "")
+                .Replace("controller", "")
+                .Replace("endpoint", "");
+            return $"/api/{processedName}";
+        });
     }
 
-    /// <summary>
-    /// 提取组名称
-    /// </summary>
-    private string? ExtractGroupName(AttributeData attr)
+    private static string? ExtractGroupName(AttributeData attr)
     {
         foreach (var namedArg in attr.NamedArguments)
         {
@@ -151,10 +171,7 @@ public class EndpointGenerator : IIncrementalGenerator
         return null;
     }
 
-    /// <summary>
-    /// 提取控制器级过滤器类型
-    /// </summary>
-    private string? ExtractControllerFilterType(AttributeData attr)
+    private static string? ExtractControllerFilterType(AttributeData attr)
     {
         foreach (var namedArg in attr.NamedArguments)
         {
@@ -168,9 +185,6 @@ public class EndpointGenerator : IIncrementalGenerator
         return null;
     }
 
-    /// <summary>
-    /// 收集类中的端点方法
-    /// </summary>
     private List<EndpointMethod> CollectEndpointMethods(
         ClassDeclarationSyntax classDecl,
         SemanticModel model,
@@ -178,43 +192,38 @@ public class EndpointGenerator : IIncrementalGenerator
     {
         var endpointMethods = new List<EndpointMethod>();
 
-        foreach (var member in classDecl.Members)
-        {
-            if (member is MethodDeclarationSyntax methodDecl &&
-                methodDecl.Modifiers.Any(m => m.ValueText == "public"))
-            {
-                var methodSymbol = model.GetDeclaredSymbol(methodDecl);
-                if (methodSymbol == null) continue;
+        var publicMethods = classDecl.Members
+            .OfType<MethodDeclarationSyntax>()
+            .Where(m => m.Modifiers.Any(mod => mod.ValueText == "public"));
 
-                var endpointMethod = ProcessEndpointMethod(methodSymbol, methodDecl, controllerMetadata);
-                if (endpointMethod != null)
-                {
-                    endpointMethods.Add(endpointMethod);
-                }
+        foreach (var methodDecl in publicMethods)
+        {
+            var methodSymbol = model.GetDeclaredSymbol(methodDecl);
+            if (methodSymbol == null) continue;
+
+            var endpointMethod = ProcessEndpointMethod(methodSymbol, methodDecl, controllerMetadata);
+            if (endpointMethod != null)
+            {
+                endpointMethods.Add(endpointMethod);
             }
         }
 
         return endpointMethods;
     }
 
-    /// <summary>
-    /// 处理单个端点方法
-    /// </summary>
     private EndpointMethod? ProcessEndpointMethod(
         ISymbol methodSymbol,
         MethodDeclarationSyntax methodDecl,
         ControllerMetadata controllerMetadata)
     {
-        // 提取方法级元数据
-        var methodAuthorize = ExtractMethodAuthorizeMetadata(methodSymbol);
-        var responseTypes = ExtractResponseTypes(methodSymbol);
-        var methodApiExplorerSettings = ExtractMethodApiExplorerSettings(methodSymbol);
         var httpMethodInfo = GetHttpMethodInfo(methodSymbol);
-
         if (httpMethodInfo == null)
             return null;
 
-        // 合并类和方法级的授权和API浏览器设置
+        var methodAuthorize = ExtractMethodAuthorizeMetadata(methodSymbol);
+        var responseTypes = ExtractResponseTypes(methodSymbol);
+        var methodApiExplorerSettings = ExtractMethodApiExplorerSettings(methodSymbol);
+
         var effectiveAuthorize = MergeAuthorizeMetadata(controllerMetadata.Authorize, methodAuthorize);
         var effectiveApiExplorerSettings = MergeApiExplorerSettings(
             controllerMetadata.ApiExplorerSettings,
@@ -233,11 +242,11 @@ public class EndpointGenerator : IIncrementalGenerator
         };
     }
 
-    private ApiExplorerSettingsMetadata? ExtractMethodApiExplorerSettings(ISymbol methodSymbol)
+    private static ApiExplorerSettingsMetadata? ExtractMethodApiExplorerSettings(ISymbol methodSymbol)
     {
         foreach (var attr in methodSymbol.GetAttributes())
         {
-            if (attr.AttributeClass?.Name == "ApiExplorerSettingsAttribute")
+            if (attr.AttributeClass?.Name == ApiExplorerSettingsAttributeName)
             {
                 return ExtractApiExplorerSettings(attr);
             }
@@ -245,18 +254,22 @@ public class EndpointGenerator : IIncrementalGenerator
         return null;
     }
 
-    private ApiExplorerSettingsMetadata? ExtractApiExplorerSettings(AttributeData attr)
+    private static ApiExplorerSettingsMetadata? ExtractApiExplorerSettings(AttributeData attr)
     {
         bool? ignoreApi = null;
         string? groupName = null;
 
         foreach (var namedArg in attr.NamedArguments)
         {
-            if (namedArg.Key == "IgnoreApi" && namedArg.Value.Value is bool ignore)
-                ignoreApi = ignore;
-
-            if (namedArg.Key == "GroupName" && namedArg.Value.Value is string name)
-                groupName = name;
+            switch (namedArg.Key)
+            {
+                case "IgnoreApi" when namedArg.Value.Value is bool ignore:
+                    ignoreApi = ignore;
+                    break;
+                case "GroupName" when namedArg.Value.Value is string name:
+                    groupName = name;
+                    break;
+            }
         }
 
         if (ignoreApi == null && groupName == null)
@@ -269,14 +282,13 @@ public class EndpointGenerator : IIncrementalGenerator
         };
     }
 
-    private ApiExplorerSettingsMetadata? MergeApiExplorerSettings(
+    private static ApiExplorerSettingsMetadata? MergeApiExplorerSettings(
         ApiExplorerSettingsMetadata? groupSettings,
         ApiExplorerSettingsMetadata? methodSettings)
     {
         if (methodSettings == null) return groupSettings;
         if (groupSettings == null) return methodSettings;
 
-        // 方法级覆盖类级
         return new ApiExplorerSettingsMetadata
         {
             IgnoreApi = methodSettings.IgnoreApi ?? groupSettings.IgnoreApi,
@@ -286,21 +298,14 @@ public class EndpointGenerator : IIncrementalGenerator
 
     private (string HttpMethod, string Template)? GetHttpMethodInfo(ISymbol methodSymbol)
     {
-        // 支持的HTTP方法特性列表
-        var httpAttributes = new[]
-        {
-                "HttpGetAttribute", "HttpPostAttribute", "HttpPutAttribute",
-                "HttpDeleteAttribute", "HttpPatchAttribute", "HttpHeadAttribute", "HttpOptionsAttribute"
-            };
-
         foreach (var attr in methodSymbol.GetAttributes())
         {
-            if (httpAttributes.Contains(attr.AttributeClass?.Name))
+            var attributeName = attr.AttributeClass?.Name;
+            if (attributeName != null && IsHttpMethodAttribute(attributeName))
             {
-                var httpMethod = attr.AttributeClass!.Name.Replace("Attribute", "").Replace("Http", "");
+                var httpMethod = attributeName.Replace("Attribute", "").Replace("Http", "");
                 var template = string.Empty;
 
-                // 获取路由模板（构造函数第一个参数）
                 if (attr.ConstructorArguments.Length > 0 &&
                     attr.ConstructorArguments[0].Value is string templateValue)
                 {
@@ -311,110 +316,140 @@ public class EndpointGenerator : IIncrementalGenerator
             }
         }
 
-        // 如果没有 HTTP 方法特性，则根据方法名称推断
-        var methodName = methodSymbol.Name;
+        return InferHttpMethodFromName(methodSymbol.Name);
+    }
 
-        // 根据方法名称前缀推断 HTTP 方法
-        if (methodName.StartsWith("Get"))
+    private static bool IsHttpMethodAttribute(string attributeName)
+    {
+        return HttpAttributeNames.Contains(attributeName);
+    }
+
+    private (string HttpMethod, string Template)? InferHttpMethodFromName(string methodName)
+    {
+        if (string.IsNullOrEmpty(methodName))
+            return null;
+
+        var span = methodName.AsSpan();
+
+        foreach (var prefix in HttpMethodPrefixes)
         {
-            return ("Get", InferRouteFromMethodName(methodName, "Get"));
-        }
-        else if (methodName.StartsWith("Post") || methodName.StartsWith("Create") || methodName.StartsWith("Add"))
-        {
-            return ("Post", InferRouteFromMethodName(methodName, ["Post", "Create", "Add"]));
-        }
-        else if (methodName.StartsWith("Put") || methodName.StartsWith("Update"))
-        {
-            return ("Put", InferRouteFromMethodName(methodName, ["Put", "Update"]));
-        }
-        else if (methodName.StartsWith("Delete") || methodName.StartsWith("Remove"))
-        {
-            return ("Delete", InferRouteFromMethodName(methodName, ["Delete", "Remove"]));
-        }
-        else if (methodName.StartsWith("Patch"))
-        {
-            return ("Patch", InferRouteFromMethodName(methodName, "Patch"));
-        }
-        else if (methodName.StartsWith("Head"))
-        {
-            return ("Head", InferRouteFromMethodName(methodName, "Head"));
-        }
-        else if (methodName.StartsWith("Options"))
-        {
-            return ("Options", InferRouteFromMethodName(methodName, "Options"));
+            if (span.StartsWith(prefix.AsSpan(), StringComparison.Ordinal))
+            {
+                var template = InferRouteFromMethodName(methodName, prefix);
+                return (prefix, template);
+            }
         }
 
-        // 如果方法名称不符合任何模式，则返回 null
+        // 使用常量来避免重复的字符串创建
+        const string createPrefix = "Create";
+        const string addPrefix = "Add";
+        const string updatePrefix = "Update";
+        const string removePrefix = "Remove";
+
+        if (span.StartsWith(createPrefix.AsSpan(), StringComparison.Ordinal) ||
+            span.StartsWith(addPrefix.AsSpan(), StringComparison.Ordinal))
+        {
+            var template = InferRouteFromMethodName(methodName, new[] { "Post", createPrefix, addPrefix });
+            return ("Post", template);
+        }
+
+        if (span.StartsWith(updatePrefix.AsSpan(), StringComparison.Ordinal))
+        {
+            var template = InferRouteFromMethodName(methodName, new[] { "Put", updatePrefix });
+            return ("Put", template);
+        }
+
+        if (span.StartsWith(removePrefix.AsSpan(), StringComparison.Ordinal))
+        {
+            var template = InferRouteFromMethodName(methodName, new[] { "Delete", removePrefix });
+            return ("Delete", template);
+        }
+
         return null;
     }
 
-    /// <summary>
-    /// 根据方法名称推断路由模板
-    /// </summary>
+    private string InferRouteFromMethodName(string methodName, string[] prefixes)
+    {
+        if (string.IsNullOrEmpty(methodName) || prefixes == null || prefixes.Length == 0)
+            return string.Empty;
+
+        var cacheKey = (methodName, string.Join(",", prefixes));
+        return KebabCaseCache.GetOrAdd(cacheKey, static key =>
+        {
+            var (name, prefixString) = key;
+            var prefixArray = prefixString.Split(',');
+
+            string routeName = name;
+
+            foreach (var prefix in prefixArray)
+            {
+                if (routeName.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    routeName = routeName.Substring(prefix.Length);
+                    break;
+                }
+            }
+
+            if (string.IsNullOrEmpty(routeName))
+                return string.Empty;
+
+            return ConvertToKebabCase(routeName);
+        });
+    }
+
     private string InferRouteFromMethodName(string methodName, string prefix)
     {
         return InferRouteFromMethodName(methodName, new[] { prefix });
     }
 
-    /// <summary>
-    /// 根据方法名称推断路由模板，支持多个前缀
-    /// </summary>
-    private string InferRouteFromMethodName(string methodName, string[] prefixes)
+    private static string ConvertToKebabCase(string input)
     {
-        string routeName = methodName;
-
-        // 移除方法名称前缀
-        foreach (var prefix in prefixes)
-        {
-            if (routeName.StartsWith(prefix))
-            {
-                routeName = routeName.Substring(prefix.Length);
-                break;
-            }
-        }
-
-        // 如果移除前缀后为空，则返回空路由
-        if (string.IsNullOrEmpty(routeName))
-        {
+        if (string.IsNullOrEmpty(input))
             return string.Empty;
+
+        // 移除 "Async" 后缀（如果存在）
+        const string asyncSuffix = "Async";
+        if (input.EndsWith(asyncSuffix, StringComparison.Ordinal))
+        {
+            input = input.Substring(0, input.Length - asyncSuffix.Length);
         }
 
-        // 确保第一个字符小写
-        routeName = char.ToLowerInvariant(routeName[0]) + routeName.Substring(1);
+        if (string.IsNullOrEmpty(input))
+            return string.Empty;
 
-        // 转换为 kebab-case 格式
-        var kebabCase = string.Empty;
-        for (int i = 0; i < routeName.Length; i++)
+        // 预估 StringBuilder 容量以提高性能
+        var estimatedLength = input.Length + (input.Length / 3); // 约增加 33% 用于连字符
+        var result = new StringBuilder(estimatedLength);
+
+        // 将首字符转换为小写
+        result.Append(char.ToLowerInvariant(input[0]));
+
+        // 处理剩余字符
+        for (int i = 1; i < input.Length; i++)
         {
-            var c = routeName[i];
-            if (i > 0 && char.IsUpper(c))
+            var currentChar = input[i];
+            if (char.IsUpper(currentChar))
             {
-                kebabCase += "-" + char.ToLowerInvariant(c);
+                result.Append('-');
+                result.Append(char.ToLowerInvariant(currentChar));
             }
             else
             {
-                kebabCase += char.ToLowerInvariant(c);
+                result.Append(currentChar);
             }
         }
 
-        // 移除末尾的"Async"（如果有）
-        if (kebabCase.EndsWith("-async"))
-        {
-            kebabCase = kebabCase.Substring(0, kebabCase.Length - 6);
-        }
-
-        return kebabCase;
+        return result.ToString();
     }
 
     private string GetRouteTemplate(ISymbol methodSymbol, string httpMethod)
     {
-        // 1. 首先尝试从HTTP方法特性中获取路由模板
         foreach (var attr in methodSymbol.GetAttributes())
         {
-            if (attr.AttributeClass?.Name == $"Http{httpMethod}Attribute" ||
-                attr.AttributeClass?.Name == $"{httpMethod}Attribute")
+            var attrName = attr.AttributeClass?.Name;
+            if (attrName == $"Http{httpMethod}Attribute" ||
+                attrName == $"{httpMethod}Attribute")
             {
-                // 获取路由模板（构造函数第一个参数）
                 if (attr.ConstructorArguments.Length > 0 &&
                     attr.ConstructorArguments[0].Value is string template)
                 {
@@ -423,32 +458,29 @@ public class EndpointGenerator : IIncrementalGenerator
             }
         }
 
-        // 2. 如果没有从特性中找到路由模板，则从方法名推断
         var methodName = methodSymbol.Name;
 
-        // 确定前缀以推断路由
-        string[] prefixes = Array.Empty<string>();
-        switch (httpMethod)
+        string[] prefixes = httpMethod switch
         {
-            case "Get": prefixes = new[] { "Get" }; break;
-            case "Post": prefixes = new[] { "Post", "Create", "Add" }; break;
-            case "Put": prefixes = new[] { "Put", "Update" }; break;
-            case "Delete": prefixes = new[] { "Delete", "Remove" }; break;
-            case "Patch": prefixes = new[] { "Patch" }; break;
-            case "Head": prefixes = new[] { "Head" }; break;
-            case "Options": prefixes = new[] { "Options" }; break;
-        }
+            "Get" => new[] { "Get" },
+            "Post" => new[] { "Post", "Create", "Add" },
+            "Put" => new[] { "Put", "Update" },
+            "Delete" => new[] { "Delete", "Remove" },
+            "Patch" => new[] { "Patch" },
+            "Head" => new[] { "Head" },
+            "Options" => new[] { "Options" },
+            _ => Array.Empty<string>()
+        };
 
-        if (prefixes.Length > 0 && prefixes.Any(p => methodName.StartsWith(p)))
+        if (prefixes.Length > 0 && prefixes.Any(p => methodName.StartsWith(p, StringComparison.Ordinal)))
         {
             return InferRouteFromMethodName(methodName, prefixes);
         }
 
-        // 如果无法推断，则返回空字符串
         return string.Empty;
     }
 
-    private string? GetFilterType(ISymbol methodSymbol, string httpMethod)
+    private static string? GetFilterType(ISymbol methodSymbol, string httpMethod)
     {
         foreach (var attr in methodSymbol.GetAttributes())
         {
@@ -467,50 +499,48 @@ public class EndpointGenerator : IIncrementalGenerator
         return null;
     }
 
-
-    private AuthorizeMetadata? ExtractMethodAuthorizeMetadata(ISymbol methodSymbol)
+    private static AuthorizeMetadata? ExtractMethodAuthorizeMetadata(ISymbol methodSymbol)
     {
         foreach (var attr in methodSymbol.GetAttributes())
         {
-            if (attr.AttributeClass?.Name == AuthorizeAttributeName)
+            var attrName = attr.AttributeClass?.Name;
+            switch (attrName)
             {
-                return ExtractAuthorizeMetadata(attr);
-            }
-            if (attr.AttributeClass?.Name == AllowAnonymousAttributeName)
-            {
-                return new AuthorizeMetadata
-                {
-                    AllowAnonymous = true
-                };
+                case AuthorizeAttributeName:
+                    return ExtractAuthorizeMetadata(attr);
+                case AllowAnonymousAttributeName:
+                    return new AuthorizeMetadata { AllowAnonymous = true };
             }
         }
         return null;
     }
 
-    private AuthorizeMetadata? ExtractAuthorizeMetadata(AttributeData attr)
+    private static AuthorizeMetadata? ExtractAuthorizeMetadata(AttributeData attr)
     {
         string? policy = null;
         string? roles = null;
         string? authenticationSchemes = null;
 
-        // 检查构造函数参数
         if (attr.ConstructorArguments.Length > 0 &&
             attr.ConstructorArguments[0].Value is string policyValue)
         {
             policy = policyValue;
         }
 
-        // 检查命名参数
         foreach (var namedArg in attr.NamedArguments)
         {
-            if (namedArg.Key == "Policy" && namedArg.Value.Value is string p)
-                policy = p;
-
-            if (namedArg.Key == "Roles" && namedArg.Value.Value is string r)
-                roles = r;
-
-            if (namedArg.Key == "AuthenticationSchemes" && namedArg.Value.Value is string s)
-                authenticationSchemes = s;
+            switch (namedArg.Key)
+            {
+                case "Policy" when namedArg.Value.Value is string p:
+                    policy = p;
+                    break;
+                case "Roles" when namedArg.Value.Value is string r:
+                    roles = r;
+                    break;
+                case "AuthenticationSchemes" when namedArg.Value.Value is string s:
+                    authenticationSchemes = s;
+                    break;
+            }
         }
 
         if (policy == null && roles == null && authenticationSchemes == null)
@@ -524,48 +554,44 @@ public class EndpointGenerator : IIncrementalGenerator
         };
     }
 
-    private AuthorizeMetadata? MergeAuthorizeMetadata(AuthorizeMetadata? group, AuthorizeMetadata? method)
+    private static AuthorizeMetadata? MergeAuthorizeMetadata(AuthorizeMetadata? group, AuthorizeMetadata? method)
     {
         if (method == null) return group;
         if (group == null) return method;
 
-        // 方法级覆盖类级
         return new AuthorizeMetadata
         {
             Policy = method.Policy ?? group.Policy,
             Roles = method.Roles ?? group.Roles,
-            AuthenticationSchemes = method.AuthenticationSchemes ?? group.AuthenticationSchemes
+            AuthenticationSchemes = method.AuthenticationSchemes ?? group.AuthenticationSchemes,
+            AllowAnonymous = method.AllowAnonymous || group.AllowAnonymous
         };
     }
 
-
-    private List<ResponseTypeMetadata> ExtractResponseTypes(ISymbol methodSymbol)
+    private static List<ResponseTypeMetadata> ExtractResponseTypes(ISymbol methodSymbol)
     {
         var responseTypes = new List<ResponseTypeMetadata>();
 
         foreach (var attr in methodSymbol.GetAttributes())
         {
-            if (attr.AttributeClass?.Name == "ProducesResponseTypeAttribute")
+            if (attr.AttributeClass?.Name == ProducesResponseTypeAttributeName)
             {
-                var statusCode = 200; // 默认值
+                var statusCode = 200;
                 string? typeName = null;
                 string? contentType = null;
 
-                // 获取StatusCode（构造函数第一个参数）
                 if (attr.ConstructorArguments.Length > 0 &&
                     attr.ConstructorArguments[0].Value is int code)
                 {
                     statusCode = code;
                 }
 
-                // 获取Type（构造函数第二个参数）
                 if (attr.ConstructorArguments.Length > 1 &&
                     attr.ConstructorArguments[1].Value is INamedTypeSymbol typeSymbol)
                 {
                     typeName = typeSymbol.ToDisplayString();
                 }
 
-                // 获取ContentType（命名参数）
                 foreach (var namedArg in attr.NamedArguments)
                 {
                     if (namedArg.Key == "ContentType" && namedArg.Value.Value is string ct)
@@ -590,12 +616,14 @@ public class EndpointGenerator : IIncrementalGenerator
     {
         ValidateEndpoints(context, endpointGroup);
 
-        // 估算代码行数: 头部(10) + 每个方法(5) + 尾部(5)
-        int estimatedLineCount = 10 + (endpointGroup.EndpointMethods.Count * 5) + 5;
-        // 估算每行平均字符数
-        int estimatedCharsPerLine = 100;
+        var methodCount = endpointGroup.EndpointMethods.Count;
+        var estimatedCapacity =
+            500 +
+            (methodCount * 200) +
+            (endpointGroup.RoutePrefix?.Length ?? 0) * methodCount +
+            100;
 
-        var source = new StringBuilder(estimatedLineCount * estimatedCharsPerLine);
+        var source = new StringBuilder(estimatedCapacity);
 
         source.AppendLine("// <auto-generated>");
         source.AppendLine("// 由EndpointGenerator自动生成，请勿修改");
@@ -612,7 +640,6 @@ public class EndpointGenerator : IIncrementalGenerator
         source.AppendLine("        {");
         source.AppendLine($"            var group = builder.MapGroup(\"{endpointGroup.RoutePrefix}\");");
 
-        // 应用组级配置
         if (!string.IsNullOrEmpty(endpointGroup.Name))
         {
             source.AppendLine($"            group.WithName(\"{endpointGroup.Name}\");");
@@ -631,68 +658,9 @@ public class EndpointGenerator : IIncrementalGenerator
 
         source.AppendLine();
 
-        // 生成端点注册代码
         foreach (var method in endpointGroup.EndpointMethods)
         {
-            var httpMethod = method.HttpMethod;
-            var routeTemplate = string.IsNullOrEmpty(method.RouteTemplate)
-                ? string.Empty
-                : $", \"{method.RouteTemplate}\"";
-
-            var endpointBuilder = $"            group.Map{httpMethod}(\"{method.RouteTemplate}\", {endpointGroup.ClassName}.{method.Name})";
-
-
-            // 添加授权配置
-            if (method.Authorize != null)
-            {
-                var authorizeCall = BuildAuthorizeCall(method.Authorize);
-                endpointBuilder += authorizeCall;
-            }
-
-            // 添加ApiExplorerSettings配置
-            if (method.ApiExplorerSettings != null)
-            {
-                var apiExplorerCall = BuildApiExplorerSettingsCall(method.ApiExplorerSettings);
-                if (!string.IsNullOrEmpty(apiExplorerCall))
-                {
-                    endpointBuilder += apiExplorerCall;
-                }
-            }
-            else
-            {
-                endpointBuilder += ".WithOpenApi()";
-            }
-
-            // 添加响应类型配置
-            foreach (var responseType in method.ResponseTypes)
-            {
-                if (responseType.TypeName != null)
-                {
-                    endpointBuilder += $".Produces<{responseType.TypeName}>({responseType.StatusCode}";
-                    if (!string.IsNullOrEmpty(responseType.ContentType))
-                    {
-                        endpointBuilder += $", \"{responseType.ContentType}\"";
-                    }
-                    endpointBuilder += ")";
-                }
-                else
-                {
-                    endpointBuilder += $".Produces({responseType.StatusCode}";
-                    if (!string.IsNullOrEmpty(responseType.ContentType))
-                    {
-                        endpointBuilder += $", \"{responseType.ContentType}\"";
-                    }
-                    endpointBuilder += ")";
-                }
-            }
-
-            if (!string.IsNullOrEmpty(method.FilterType))
-            {
-                endpointBuilder += $".AddEndpointFilter<{method.FilterType}>()";
-            }
-
-            endpointBuilder += ";";
-            source.AppendLine(endpointBuilder);
+            BuildMethodRegistration(source, method, endpointGroup.ClassName);
         }
 
         source.AppendLine();
@@ -704,43 +672,126 @@ public class EndpointGenerator : IIncrementalGenerator
         context.AddSource($"{endpointGroup.ClassName}Extensions.g.cs", SourceText.From(source.ToString(), Encoding.UTF8));
     }
 
+    private static void BuildMethodRegistration(StringBuilder source, EndpointMethod method, string className)
+    {
+        if (method == null || string.IsNullOrEmpty(method.Name))
+        {
+            return; // 跳过无效的方法
+        }
+
+        source.Append($"            group.Map{method.HttpMethod}(\"{method.RouteTemplate}\", {className}.{method.Name})");
+
+        if (method.Authorize != null)
+        {
+            var authorizeCall = BuildAuthorizeCall(method.Authorize);
+            if (!string.IsNullOrEmpty(authorizeCall))
+            {
+                source.Append(authorizeCall);
+            }
+        }
+
+        if (method.ApiExplorerSettings != null)
+        {
+            var apiExplorerCall = BuildApiExplorerSettingsCall(method.ApiExplorerSettings);
+            if (!string.IsNullOrEmpty(apiExplorerCall))
+            {
+                source.Append(apiExplorerCall);
+            }
+        }
+        else
+        {
+            source.Append(".WithOpenApi()");
+        }
+
+        // 添加响应类型
+        foreach (var responseType in method.ResponseTypes ?? Enumerable.Empty<ResponseTypeMetadata>())
+        {
+            AppendProducesCall(source, responseType);
+        }
+
+        // 添加过滤器
+        if (!string.IsNullOrEmpty(method.FilterType))
+        {
+            source.Append($".AddEndpointFilter<{method.FilterType}>()");
+        }
+
+        source.AppendLine(";");
+    }
+
+    private static void AppendProducesCall(StringBuilder source, ResponseTypeMetadata responseType)
+    {
+        if (responseType == null) return;
+
+        if (!string.IsNullOrEmpty(responseType.TypeName))
+        {
+            source.Append($".Produces<{responseType.TypeName}>({responseType.StatusCode}");
+            if (!string.IsNullOrEmpty(responseType.ContentType))
+            {
+                source.Append($", \"{responseType.ContentType}\"");
+            }
+            source.Append(')');
+        }
+        else
+        {
+            source.Append($".Produces({responseType.StatusCode}");
+            if (!string.IsNullOrEmpty(responseType.ContentType))
+            {
+                source.Append($", \"{responseType.ContentType}\"");
+            }
+            source.Append(')');
+        }
+    }
 
     private void GenerateMiniControllerRegistration(SourceProductionContext context, List<(string nameSpace, string className)> ClassInfoList)
     {
-        var Extension = new StringBuilder();
+        var estimatedCapacity = 300 + (ClassInfoList.Count * 50);
+        var Extension = new StringBuilder(estimatedCapacity);
+
         Extension.AppendLine("// <auto-generated>");
         Extension.AppendLine("// 由EndpointGenerator自动生成，请勿修改");
         Extension.AppendLine("// </auto-generated>");
         Extension.AppendLine();
         Extension.AppendLine("using Microsoft.AspNetCore.Builder;");
         Extension.AppendLine("using Microsoft.AspNetCore.Http;");
-        foreach (var classInfo in ClassInfoList)
+
+        var uniqueNamespaces = ClassInfoList.Select(c => c.nameSpace).Distinct();
+        foreach (var ns in uniqueNamespaces)
         {
-            Extension.AppendLine($"using {classInfo.nameSpace};");
+            Extension.AppendLine($"using {ns};");
         }
+
         Extension.AppendLine();
-        Extension.AppendLine($"namespace Microsoft.AspNetCore.Builder");
+        Extension.AppendLine("namespace Microsoft.AspNetCore.Builder");
         Extension.AppendLine("{");
-        Extension.AppendLine($"    public static class MiniControllerExtensions");
+        Extension.AppendLine("    public static class MiniControllerExtensions");
         Extension.AppendLine("    {");
-        Extension.AppendLine($"        public static IEndpointRouteBuilder MapMiniController(this IEndpointRouteBuilder builder)");
+        Extension.AppendLine("        public static IEndpointRouteBuilder MapMiniController(this IEndpointRouteBuilder builder)");
         Extension.AppendLine("        {");
+
         foreach (var classInfo in ClassInfoList)
         {
-            Extension.AppendLine($"           builder.Map{classInfo.className}();");
+            Extension.AppendLine($"            builder.Map{classInfo.className}();");
         }
+
         Extension.AppendLine("            return builder;");
         Extension.AppendLine("        }");
         Extension.AppendLine("    }");
         Extension.AppendLine("}");
 
-        context.AddSource($"MiniControllerExtensions.g.cs", SourceText.From(Extension.ToString(), Encoding.UTF8));
+        context.AddSource("MiniControllerExtensions.g.cs", SourceText.From(Extension.ToString(), Encoding.UTF8));
     }
-    private string BuildAuthorizeCall(AuthorizeMetadata metadata)
-    {
-        if (metadata == null) return string.Empty;
 
-        var arguments = new List<string>();
+    private static string BuildAuthorizeCall(AuthorizeMetadata metadata)
+    {
+        if (metadata?.AllowAnonymous == true)
+        {
+            return ".AllowAnonymous()";
+        }
+
+        if (metadata == null)
+            return string.Empty;
+
+        var arguments = new List<string>(3);
 
         if (!string.IsNullOrEmpty(metadata.Policy))
             arguments.Add($"\"{metadata.Policy}\"");
@@ -752,40 +803,50 @@ public class EndpointGenerator : IIncrementalGenerator
             arguments.Add($"AuthenticationSchemes: \"{metadata.AuthenticationSchemes}\"");
 
         if (arguments.Count == 0)
-            return $".RequireAuthorization()";
+            return ".RequireAuthorization()";
 
         return $".RequireAuthorization({string.Join(", ", arguments)})";
     }
 
-    private string BuildApiExplorerSettingsCall(ApiExplorerSettingsMetadata settings)
+    private static string BuildApiExplorerSettingsCall(ApiExplorerSettingsMetadata settings)
     {
         if (settings == null) return string.Empty;
 
-        var builder = new StringBuilder();
+        var result = new StringBuilder(64);
 
         if (settings.IgnoreApi == true)
         {
-            builder.Append(".ExcludeFromDescription()");
+            result.Append(".ExcludeFromDescription()");
         }
         else
         {
-            builder.Append(".WithOpenApi()");
+            result.Append(".WithOpenApi()");
         }
 
         if (!string.IsNullOrEmpty(settings.GroupName))
         {
-            builder.Append($".WithTags(\"{settings.GroupName}\")");
+            result.Append($".WithTags(\"{settings.GroupName}\")");
         }
 
-        return builder.ToString();
+        return result.ToString();
     }
 
-    private void ValidateEndpoints(SourceProductionContext context, EndpointGroupClass endpointGroup)
+    private static void ValidateEndpoints(SourceProductionContext context, EndpointGroupClass endpointGroup)
     {
-        // 检查路由冲突
-        var routeMap = new Dictionary<string, List<string>>();
+        if (endpointGroup?.EndpointMethods == null)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                CreateDiagnosticDescriptor("MC002", "无效的端点组", "端点组或其方法列表为空", DiagnosticSeverity.Error),
+                Location.None));
+            return;
+        }
+
+        var routeMap = new Dictionary<string, List<string>>(endpointGroup.EndpointMethods.Count);
+
         foreach (var method in endpointGroup.EndpointMethods)
         {
+            if (method == null) continue;
+
             var key = $"{method.HttpMethod}:{method.RouteTemplate}";
             if (!routeMap.TryGetValue(key, out var methods))
             {
@@ -795,19 +856,27 @@ public class EndpointGenerator : IIncrementalGenerator
             {
                 methods.Add(method.Name);
                 context.ReportDiagnostic(Diagnostic.Create(
-                    new DiagnosticDescriptor(
-                        "MC001",
-                        "路由冲突",
-                        $"方法 {string.Join(", ", methods)} 具有相同的路由 {key}",
-                        "MiniController",
-                        DiagnosticSeverity.Warning,
-                        isEnabledByDefault: true),
+                    CreateDiagnosticDescriptor("MC001", "路由冲突",
+                        $"控制器 {endpointGroup.ClassName} 中的方法 {string.Join(", ", methods)} 具有相同的路由 {key}",
+                        DiagnosticSeverity.Warning),
                     Location.None));
             }
         }
-    } 
+    }
+
+    private static DiagnosticDescriptor CreateDiagnosticDescriptor(string id, string title, string messageFormat, DiagnosticSeverity severity)
+    {
+        return new DiagnosticDescriptor(
+            id,
+            title,
+            messageFormat,
+            "MiniController",
+            severity,
+            isEnabledByDefault: true,
+            description: $"MiniController 源码生成器诊断：{title}"
+        );
+    }
 }
-// === 辅助模型类 ===
 
 public class EndpointGroupClass
 {
@@ -838,9 +907,9 @@ public class EndpointMethod
 
     public AuthorizeMetadata? Authorize { get; set; }
 
-    public List<ResponseTypeMetadata> ResponseTypes { get; set; } = [];
+    public List<ResponseTypeMetadata> ResponseTypes { get; set; } = new();
 
-    public ApiExplorerSettingsMetadata ApiExplorerSettings { get; set; }
+    public ApiExplorerSettingsMetadata? ApiExplorerSettings { get; set; }
 }
 
 public class AuthorizeMetadata
@@ -851,7 +920,7 @@ public class AuthorizeMetadata
 
     public string? AuthenticationSchemes { get; set; }
 
-    public bool AllowAnonymous { get; set; } = false; // 添加AllowAnonymous属性以支持匿名访问
+    public bool AllowAnonymous { get; set; } = false;
 }
 
 public class ResponseTypeMetadata
@@ -868,9 +937,6 @@ public class ApiExplorerSettingsMetadata
     public string? GroupName { get; set; }
 }
 
-/// <summary>
-/// 用于存储控制器级元数据的内部类
-/// </summary>
 public class ControllerMetadata
 {
     public string RoutePrefix { get; set; } = string.Empty;
