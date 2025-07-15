@@ -28,16 +28,16 @@ public class EndpointGenerator : IIncrementalGenerator
 
         var endpointGroupsCollection = endpointGroupProvider.Collect();
 
-        var combinedProvider = endpointGroupProvider.Combine(endpointGroupsCollection);
-
+        // 为每个端点组生成单独的扩展类
         context.RegisterImplementationSourceOutput(
             endpointGroupProvider,
             (spc, endpointGroup) => SourceCodeGenerator.GenerateEndpointRegistration(spc, endpointGroup!)
         );
 
+        // 只为所有端点组生成一次统一的MiniController注册扩展
         context.RegisterImplementationSourceOutput(
-            combinedProvider,
-            (spc, tuple) => SourceCodeGenerator.GenerateMiniControllerRegistration(spc, tuple.Right.Select(e => (e.Namespace, e.ClassName)).ToList())
+            endpointGroupsCollection,
+            (spc, endpointGroups) => SourceCodeGenerator.GenerateMiniControllerRegistration(spc, endpointGroups.Where(e => e != null).Select(e => (e!.Namespace, e.ClassName)).ToList())
         );
     }
 
@@ -105,7 +105,7 @@ public class EndpointGenerator : IIncrementalGenerator
             switch (attrName)
             {
                 case HttpConstants.MiniControllerAttributeName:
-                    metadata.RoutePrefix = ExtractRoutePrefix(attr, classDecl);
+                    metadata.RoutePrefix = ExtractRoutePrefix(attr, classDecl, classSymbol);
                     metadata.GroupName = AttributeHelper.ExtractGroupName(attr);
                     metadata.FilterType = AttributeHelper.ExtractControllerFilterType(attr);
                     break;
@@ -124,16 +124,19 @@ public class EndpointGenerator : IIncrementalGenerator
         return metadata;
     }
 
-    private string ExtractRoutePrefix(AttributeData attr, ClassDeclarationSyntax classDecl)
+    private string ExtractRoutePrefix(AttributeData attr, ClassDeclarationSyntax classDecl, ISymbol classSymbol)
     {
+        string? routeTemplate = null;
+        
         if (attr.ConstructorArguments.Length > 0 &&
             attr.ConstructorArguments[0].Value is string prefix)
         {
-            return prefix;
+            routeTemplate = prefix;
         }
 
         var className = classDecl.Identifier.ValueText;
-        return StringExtensions.GetOrAddRouteFromClassName(className);
+        
+        return StringExtensions.GetOrAddRouteFromClassName(className, classSymbol, routeTemplate);
     }
 
     private List<EndpointMethod> CollectEndpointMethods(
@@ -181,16 +184,56 @@ public class EndpointGenerator : IIncrementalGenerator
             methodApiExplorerSettings
         );
 
+        // 处理路由模板，支持 [action] 占位符
+        var routeTemplate = GetEffectiveRouteTemplate(
+            controllerMetadata.RoutePrefix, 
+            httpMethodInfo.Value.Template,
+            methodDecl.Identifier.ValueText,
+            httpMethodInfo.Value.HttpMethod,
+            methodSymbol);
+
         return new EndpointMethod
         {
             Name = methodDecl.Identifier.ValueText,
             HttpMethod = httpMethodInfo.Value.HttpMethod,
-            RouteTemplate = HttpMethodHelper.GetRouteTemplate(methodSymbol, httpMethodInfo.Value.HttpMethod),
+            RouteTemplate = routeTemplate,
             FilterType = HttpMethodHelper.GetFilterType(methodSymbol, httpMethodInfo.Value.HttpMethod),
             Authorize = effectiveAuthorize,
             ResponseTypes = responseTypes,
             ApiExplorerSettings = effectiveApiExplorerSettings
         };
+    }
+
+    /// <summary>
+    /// 获取有效的路由模板，处理控制器级别的 [action] 占位符
+    /// </summary>
+    private string GetEffectiveRouteTemplate(string controllerRoutePrefix, string methodRouteTemplate, string methodName, string httpMethod, ISymbol methodSymbol)
+    {
+        // 如果控制器路由前缀包含 [action] 占位符，方法级别的路由模板应该只包含额外的参数
+        if (!string.IsNullOrEmpty(controllerRoutePrefix) && controllerRoutePrefix.Contains("[action]"))
+        {
+            // 对于包含 [action] 的控制器路由，只返回明确指定的HTTP属性路由模板
+            // 不要自动推断，因为动作名称已经在控制器级别处理了
+            foreach (var attr in methodSymbol.GetAttributes())
+            {
+                var attributeName = attr.AttributeClass?.Name;
+                if (attributeName != null && AttributeHelper.IsHttpMethodAttribute(attributeName))
+                {
+                    if (attr.ConstructorArguments.Length > 0 &&
+                        attr.ConstructorArguments[0].Value is string templateValue)
+                    {
+                        return templateValue;
+                    }
+                    // 如果HTTP属性没有指定路由模板，返回空字符串
+                    return string.Empty;
+                }
+            }
+            // 如果没有HTTP属性，返回空字符串
+            return string.Empty;
+        }
+        
+        // 如果控制器路由前缀不包含 [action]，则使用原有逻辑
+        return HttpMethodHelper.GetRouteTemplate(methodSymbol, httpMethod);
     }
 
     private static ApiExplorerSettingsMetadata? ExtractMethodApiExplorerSettings(ISymbol methodSymbol)

@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using MiniController.Models;
+using MiniController.Helpers;
 
 namespace MiniController.Generators;
 
@@ -36,6 +37,116 @@ public static class SourceCodeGenerator
         source.AppendLine("    {");
         source.AppendLine($"        public static IEndpointRouteBuilder Map{endpointGroup.ClassName}(this IEndpointRouteBuilder builder)");
         source.AppendLine("        {");
+
+        // 检查控制器路由是否包含 [action] 占位符
+        var hasActionPlaceholder = !string.IsNullOrEmpty(endpointGroup.RoutePrefix) && 
+                                  endpointGroup.RoutePrefix.Contains("[action]");
+
+        if (hasActionPlaceholder)
+        {
+            // 对于包含 [action] 的路由，直接注册每个方法到 builder，不使用 MapGroup
+            GenerateDirectMethodRegistrations(source, endpointGroup);
+        }
+        else
+        {
+            // 对于不包含 [action] 的路由，使用传统的 MapGroup 方式
+            GenerateGroupMethodRegistrations(source, endpointGroup);
+        }
+
+        source.AppendLine();
+        source.AppendLine("            return builder;");
+        source.AppendLine("        }");
+        source.AppendLine("    }");
+        source.AppendLine("}");
+
+        context.AddSource($"{endpointGroup.ClassName}Extensions.g.cs", SourceText.From(source.ToString(), Encoding.UTF8));
+    }
+
+    /// <summary>
+    /// 生成直接方法注册（用于包含 [action] 的路由）
+    /// </summary>
+    private static void GenerateDirectMethodRegistrations(StringBuilder source, EndpointGroupClass endpointGroup)
+    {
+        foreach (var method in endpointGroup.EndpointMethods)
+        {
+            // 解析控制器路由中的 [action] 占位符
+            var resolvedRoute = RouteTemplateResolver.ResolveActionTemplate(
+                endpointGroup.RoutePrefix!, 
+                method.Name, 
+                method.HttpMethod);
+
+            // 如果方法有额外的路由模板，则追加
+            if (!string.IsNullOrEmpty(method.RouteTemplate))
+            {
+                if (resolvedRoute.EndsWith("/") || method.RouteTemplate.StartsWith("/"))
+                {
+                    resolvedRoute = resolvedRoute.TrimEnd('/') + "/" + method.RouteTemplate.TrimStart('/');
+                }
+                else
+                {
+                    resolvedRoute = resolvedRoute + "/" + method.RouteTemplate;
+                }
+            }
+
+            source.Append($"            builder.Map{method.HttpMethod}(\"{resolvedRoute}\", {endpointGroup.ClassName}.{method.Name})");
+
+            // 添加授权
+            if (method.Authorize != null)
+            {
+                var authorizeCall = BuildAuthorizeCall(method.Authorize);
+                if (!string.IsNullOrEmpty(authorizeCall))
+                {
+                    source.Append(authorizeCall);
+                }
+            }
+            else if (endpointGroup.Authorize != null)
+            {
+                var authorizeCall = BuildAuthorizeCall(endpointGroup.Authorize);
+                if (!string.IsNullOrEmpty(authorizeCall))
+                {
+                    source.Append(authorizeCall);
+                }
+            }
+
+            // 添加API Explorer设置
+            if (method.ApiExplorerSettings != null)
+            {
+                var apiExplorerCall = BuildApiExplorerSettingsCall(method.ApiExplorerSettings);
+                if (!string.IsNullOrEmpty(apiExplorerCall))
+                {
+                    source.Append(apiExplorerCall);
+                }
+            }
+            else
+            {
+                source.Append(".WithOpenApi()");
+            }
+
+            // 添加响应类型
+            foreach (var responseType in method.ResponseTypes ?? Enumerable.Empty<ResponseTypeMetadata>())
+            {
+                AppendProducesCall(source, responseType);
+            }
+
+            // 添加过滤器
+            if (!string.IsNullOrEmpty(method.FilterType))
+            {
+                source.Append($".AddEndpointFilter<{method.FilterType}>()");
+            }
+            else if (!string.IsNullOrEmpty(endpointGroup.FilterType))
+            {
+                source.Append($".AddEndpointFilter<{endpointGroup.FilterType}>()");
+            }
+
+            source.AppendLine(";");
+        }
+    }
+
+    /// <summary>
+    /// 生成组方法注册（用于不包含 [action] 的路由）
+    /// </summary>
+    private static void GenerateGroupMethodRegistrations(StringBuilder source, EndpointGroupClass endpointGroup)
+    {
         source.AppendLine($"            var group = builder.MapGroup(\"{endpointGroup.RoutePrefix}\");");
 
         if (!string.IsNullOrEmpty(endpointGroup.Name))
@@ -60,14 +171,6 @@ public static class SourceCodeGenerator
         {
             BuildMethodRegistration(source, method, endpointGroup.ClassName);
         }
-
-        source.AppendLine();
-        source.AppendLine("            return builder;");
-        source.AppendLine("        }");
-        source.AppendLine("    }");
-        source.AppendLine("}");
-
-        context.AddSource($"{endpointGroup.ClassName}Extensions.g.cs", SourceText.From(source.ToString(), Encoding.UTF8));
     }
 
     public static void GenerateMiniControllerRegistration(SourceProductionContext context, List<(string nameSpace, string className)> ClassInfoList)
