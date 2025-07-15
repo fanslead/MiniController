@@ -232,6 +232,27 @@ public class EndpointGenerator : IIncrementalGenerator
             return string.Empty;
         }
         
+        // 检查是否有明确指定的HTTP属性路由模板
+        foreach (var attr in methodSymbol.GetAttributes())
+        {
+            var attributeName = attr.AttributeClass?.Name;
+            if (attributeName != null && AttributeHelper.IsHttpMethodAttribute(attributeName))
+            {
+                if (attr.ConstructorArguments.Length > 0 &&
+                    attr.ConstructorArguments[0].Value is string templateValue)
+                {
+                    return templateValue;
+                }
+                // 如果HTTP属性没有指定路由模板，且控制器路由是自定义的完整路径（不包含占位符），返回空字符串
+                if (!string.IsNullOrEmpty(controllerRoutePrefix) && 
+                    !controllerRoutePrefix.Contains("[controller]") && 
+                    !controllerRoutePrefix.Contains("[area]"))
+                {
+                    return string.Empty;
+                }
+            }
+        }
+        
         // 如果控制器路由前缀不包含 [action]，则使用原有逻辑
         return HttpMethodHelper.GetRouteTemplate(methodSymbol, httpMethod);
     }
