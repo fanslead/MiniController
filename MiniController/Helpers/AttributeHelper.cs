@@ -9,17 +9,6 @@ namespace MiniController.Helpers;
 
 public static class AttributeHelper
 {
-    public static string? ExtractGroupName(AttributeData attr)
-    {
-        foreach (var namedArg in attr.NamedArguments)
-        {
-            if (namedArg.Key == "Name" && namedArg.Value.Value is string name)
-                return name;
-        }
-
-        return null;
-    }
-
     public static string? ExtractControllerFilterType(AttributeData attr)
     {
         foreach (var namedArg in attr.NamedArguments)

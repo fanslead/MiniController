@@ -34,10 +34,15 @@ public class EndpointGenerator : IIncrementalGenerator
             (spc, endpointGroup) => SourceCodeGenerator.GenerateEndpointRegistration(spc, endpointGroup!)
         );
 
-        // 只为所有端点组生成一次统一的MiniController注册扩展
+        // 生成统一的MiniController注册扩展和DI注册
         context.RegisterImplementationSourceOutput(
             endpointGroupsCollection,
-            (spc, endpointGroups) => SourceCodeGenerator.GenerateMiniControllerRegistration(spc, endpointGroups.Where(e => e != null).Select(e => (e!.Namespace, e.ClassName)).ToList())
+            (spc, endpointGroups) =>
+            {
+                var groups = endpointGroups.Where(e => e != null).ToList();
+                SourceCodeGenerator.GenerateMiniControllerRegistration(spc, groups.Select(e => (e!.Namespace, e.ClassName)).ToList());
+                SourceCodeGenerator.GenerateDependencyInjectionRegistration(spc, groups!);
+            }
         );
     }
 
@@ -81,15 +86,18 @@ public class EndpointGenerator : IIncrementalGenerator
         if (endpointMethods.Count == 0)
             return null;
 
+        // 检查类是否为静态类
+        var isStatic = classDecl.Modifiers.Any(m => m.ValueText == "static");
+
         return new EndpointGroupClass
         {
             Namespace = classSymbol.ContainingNamespace.ToString(),
             ClassName = classDecl.Identifier.ValueText,
             RoutePrefix = controllerMetadata.RoutePrefix,
-            Name = controllerMetadata.GroupName,
             FilterType = controllerMetadata.FilterType,
             Authorize = controllerMetadata.Authorize,
-            EndpointMethods = endpointMethods
+            EndpointMethods = endpointMethods,
+            IsStatic = isStatic
         };
     }
 
@@ -106,7 +114,6 @@ public class EndpointGenerator : IIncrementalGenerator
             {
                 case HttpConstants.MiniControllerAttributeName:
                     metadata.RoutePrefix = ExtractRoutePrefix(attr, classDecl, classSymbol);
-                    metadata.GroupName = AttributeHelper.ExtractGroupName(attr);
                     metadata.FilterType = AttributeHelper.ExtractControllerFilterType(attr);
                     break;
                 case HttpConstants.AuthorizeAttributeName:
@@ -127,7 +134,7 @@ public class EndpointGenerator : IIncrementalGenerator
     private string ExtractRoutePrefix(AttributeData attr, ClassDeclarationSyntax classDecl, ISymbol classSymbol)
     {
         string? routeTemplate = null;
-        
+
         if (attr.ConstructorArguments.Length > 0 &&
             attr.ConstructorArguments[0].Value is string prefix)
         {
@@ -135,7 +142,7 @@ public class EndpointGenerator : IIncrementalGenerator
         }
 
         var className = classDecl.Identifier.ValueText;
-        
+
         return StringExtensions.GetOrAddRouteFromClassName(className, classSymbol, routeTemplate);
     }
 
@@ -192,6 +199,12 @@ public class EndpointGenerator : IIncrementalGenerator
             httpMethodInfo.Value.HttpMethod,
             methodSymbol);
 
+        // 提取方法参数信息
+        var parameters = ExtractMethodParameters(methodSymbol);
+        
+        // 检查是否为静态方法
+        var isStatic = methodDecl.Modifiers.Any(m => m.ValueText == "static");
+
         return new EndpointMethod
         {
             Name = methodDecl.Identifier.ValueText,
@@ -200,8 +213,74 @@ public class EndpointGenerator : IIncrementalGenerator
             FilterType = HttpMethodHelper.GetFilterType(methodSymbol, httpMethodInfo.Value.HttpMethod),
             Authorize = effectiveAuthorize,
             ResponseTypes = responseTypes,
-            ApiExplorerSettings = effectiveApiExplorerSettings
+            ApiExplorerSettings = effectiveApiExplorerSettings,
+            Parameters = parameters,
+            ReturnType = ExtractReturnType(methodSymbol),
+            IsStatic = isStatic
         };
+    }
+
+    /// <summary>
+    /// 提取方法参数信息
+    /// </summary>
+    private List<MethodParameterInfo> ExtractMethodParameters(ISymbol methodSymbol)
+    {
+        var parameters = new List<MethodParameterInfo>();
+        
+        if (methodSymbol is IMethodSymbol method)
+        {
+            foreach (var param in method.Parameters)
+            {
+                var paramInfo = new MethodParameterInfo
+                {
+                    Name = param.Name,
+                    Type = param.Type.ToDisplayString()
+                };
+
+                // 检查参数特性
+                foreach (var attr in param.GetAttributes())
+                {
+                    var attrName = attr.AttributeClass?.Name;
+                    switch (attrName)
+                    {
+                        case "FromServicesAttribute":
+                            paramInfo.IsFromServices = true;
+                            break;
+                        case "FromRouteAttribute":
+                            paramInfo.IsFromRoute = true;
+                            break;
+                        case "FromQueryAttribute":
+                            paramInfo.IsFromQuery = true;
+                            break;
+                        case "FromBodyAttribute":
+                            paramInfo.IsFromBody = true;
+                            break;
+                        case "FromHeaderAttribute":
+                            paramInfo.IsFromHeader = true;
+                            break;
+                        case "FromFormAttribute":
+                            paramInfo.IsFromForm = true;
+                            break;
+                    }
+                }
+
+                parameters.Add(paramInfo);
+            }
+        }
+
+        return parameters;
+    }
+
+    /// <summary>
+    /// 提取方法返回类型
+    /// </summary>
+    private string ExtractReturnType(ISymbol methodSymbol)
+    {
+        if (methodSymbol is IMethodSymbol method)
+        {
+            return method.ReturnType.ToDisplayString();
+        }
+        return "IResult";
     }
 
     /// <summary>
@@ -213,7 +292,7 @@ public class EndpointGenerator : IIncrementalGenerator
         if (!string.IsNullOrEmpty(controllerRoutePrefix) && controllerRoutePrefix.Contains("[action]"))
         {
             // 对于包含 [action] 的控制器路由，只返回明确指定的HTTP属性路由模板
-            // 不要自动推断，因为动作名称已经在控制器级别处理了
+            // [action]的解析由RouteTemplateResolver.ResolveActionTemplate处理
             foreach (var attr in methodSymbol.GetAttributes())
             {
                 var attributeName = attr.AttributeClass?.Name;
@@ -224,7 +303,7 @@ public class EndpointGenerator : IIncrementalGenerator
                     {
                         return templateValue;
                     }
-                    // 如果HTTP属性没有指定路由模板，返回空字符串
+                    // 如果HTTP属性没有指定路由模板，对于[action]模式返回空字符串
                     return string.Empty;
                 }
             }
