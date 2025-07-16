@@ -36,7 +36,7 @@ MiniController 是一个基于 Roslyn Source Generator 的 .NET Standard 2.0 端
 - **HTTP 方法推断**: 自动从方法名推断 HTTP 方法（Get、Post、Put、Delete、Patch 等）
 - **一键注册**: 自动生成 `MapMiniController` 扩展方法，一行代码注册所有端点
 - **静态和实例类支持**: 支持静态类和实例类两种模式
-- **自动依赖注入**: 自动生成 `AddMiniControllers` 扩展方法，支持实例类的依赖注入
+- **自动依赖注入**: 自动生成 `AddMiniControllers` 扩展方法，支持依赖注入
 - **智能参数绑定**: 支持 `[FromServices]`、`[FromRoute]`、`[FromQuery]` 等参数绑定特性
 - **路由冲突检测**: 编译时检测路由冲突，提供诊断信息
 
@@ -58,8 +58,9 @@ dotnet add package MiniController
 ```
 ## 🏃‍♂️ 快速开始
 
-### 1. 定义一个简单的 MiniController（静态类）using MiniController.Attributes;
+### 1. 定义一个简单的 MiniController（静态类）
 ``` csharp
+using MiniController.Attributes;
 using Microsoft.AspNetCore.Mvc;
 
 [MiniController("/api/demo")]
@@ -76,8 +77,9 @@ public static class DemoController
     public static IResult CreateUser() => Results.Created("/api/demo/user/1", new { Id = 1 });
 }
 ```
-### 2. 定义一个实例类 MiniControllerusing MiniController.Attributes;
+### 2. 定义一个实例类 MiniController
 ``` csharp
+using MiniController.Attributes;
 using Microsoft.AspNetCore.Mvc;
 
 [MiniController("/api/products")]
@@ -115,8 +117,9 @@ public class ProductController
 
 public record Product(int Id, string Name);
 ```
-### 3. 在应用启动时注册所有端点var builder = WebApplication.CreateBuilder(args);
-``` csharp  
+### 3. 在应用启动时注册所有端点
+``` csharp
+var builder = WebApplication.CreateBuilder(args);
 // 添加必要的服务
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
@@ -145,8 +148,9 @@ Source Generator 会自动生成如下扩展方法：
 
 MiniController 支持强大的路由模板语法，兼容 ASP.NET Core MVC 路由模板：
 
-#### 1. Area 支持using Microsoft.AspNetCore.Mvc;
+#### 1. Area 支持
 ``` csharp
+using Microsoft.AspNetCore.Mvc;
 [Area("Admin")]
 [MiniController("/api/[area]/[controller]")]
 public class UserEndpoints
@@ -164,8 +168,9 @@ public class UserEndpoints
     }
 }
 ```
-#### 2. Controller 占位符[MiniController("/api/[controller]")]
+#### 2. Controller 占位符
 ``` csharp
+[MiniController("/api/[controller]")]
 public class OrderController
 {
     public static IResult GetOrders() // 自动推断为 GET /api/order
@@ -179,8 +184,9 @@ public class OrderController
     }
 }
 ```
-#### 3. Action 占位符[MiniController("/api/v1/[controller]/[action]")]
+#### 3. Action 占位符
 ``` csharp
+[MiniController("/api/v1/[controller]/[action]")]
 public class ProductService
 {
     public static IResult GetList() // 路由: GET /api/v1/product/list
@@ -449,8 +455,8 @@ public record UpdateUserRequest(string Name);
 ## 🔄 静态类 vs 实例类
 
 ### 静态类模式
-- **优点**: 性能更高，无需依赖注入，启动更快
-- **缺点**: 无法使用依赖注入，不支持复杂的业务逻辑
+- **优点**: 性能更高，启动更快
+- **缺点**: 仅支持方法级别依赖注入，不支持构造函数注入
 - **适用场景**: 简单的 API、工具类、无状态操作
 [MiniController("/api/simple")]
 public static class SimpleController
@@ -459,7 +465,7 @@ public static class SimpleController
     public static IResult Ping() => Results.Ok("pong");
 }
 ### 实例类模式
-- **优点**: 支持依赖注入，更好的测试性，支持复杂业务逻辑
+- **优点**: 支持完整依赖注入，更好的测试性，支持复杂业务逻辑
 - **缺点**: 轻微的性能开销
 - **适用场景**: 复杂的业务逻辑，需要依赖注入的场景
 ``` csharp
