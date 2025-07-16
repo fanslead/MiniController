@@ -26,8 +26,9 @@ public class TestEndpoints
     }
 
     [HttpGet("ABC/{id}")]
-    public static IResult GetABC(string id)
+    public static IResult GetABC(string id, [FromServices] TestDiService testDiService)
     {
+        testDiService.TestMethod();
         return Results.Ok("Hello, ABC!");
     }
 }
