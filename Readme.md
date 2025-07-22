@@ -45,15 +45,18 @@ MiniController 是一个基于 Roslyn Source Generator 的 .NET Standard 2.0 端
 ### 通过 NuGet 包管理器
 ```
 Install-Package MiniController
+Install-Package MiniController.Attributesr
 ```
 ### 通过 .NET CLI
 ```
 dotnet add package MiniController
+dotnet add package MiniController.Attributesr
 ```
 ### 手动添加到项目文件
 ``` xml
 <ItemGroup>
-  <PackageReference Include="MiniController" Version="1.0.3" PrivateAssets="all"/>
+  <PackageReference Include="MiniController" Version="1.0.4" PrivateAssets="all"/>
+  <PackageReference Include="MiniController.Attributesr" Version="1.0.4"/>
 </ItemGroup>
 ```
 ## 🏃‍♂️ 快速开始
