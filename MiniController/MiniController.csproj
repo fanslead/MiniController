@@ -2,14 +2,19 @@
 
 	<PropertyGroup>
 		<TargetFramework>netstandard2.0</TargetFramework>
+		<IncludeBuildOutput>false</IncludeBuildOutput>
+		<IsRoslynAnalyzer>true</IsRoslynAnalyzer>
+		<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+		<GetTargetPathDependsOn>$(GetTargetPathDependsOn);GetDependencyTargetPaths</GetTargetPathDependsOn>
 		<langVersion>latest</langVersion>
 		<RootNamespace>MiniController</RootNamespace>
 		<AssemblyName>MiniController</AssemblyName>
 		<GenerateAssemblyInfo>false</GenerateAssemblyInfo>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 		<EnforceExtendedAnalyzerRules>true</EnforceExtendedAnalyzerRules>
-		<Version>1.0.3</Version>
+		<Version>1.0.4</Version>
 		<Authors>FunShow</Authors>
 		<Description>MiniController 是一个基于 Roslyn Source Generator 的 Standard 2.0 端点自动注册工具。它通过自定义特性（如 MiniControllerAttribute）自动生成分组端点注册扩展方法，简化Minimal API 路由、授权、过滤器和响应类型的声明与维护。</Description>
 		<PackageProjectUrl>https://github.com/fanslead/MiniController</PackageProjectUrl>
@@ -18,6 +23,20 @@
 		<PackageTags>MiniController</PackageTags>
 	</PropertyGroup>
 
+	<Target Name="GetDependencyTargetPaths" AfterTargets="ResolvePackageDependenciesForBuild">
+		<ItemGroup>
+			<TargetPathWithTargetPlatformMoniker Include="@(ResolvedCompileFileDefinitions)" IncludeRuntimeDependency="false" />
+		</ItemGroup>
+	</Target>
+
+	<ItemGroup>
+		<!-- Package the generator in the analyzer directory of the nuget package -->
+		<None Include="$(OutputPath)\$(AssemblyName).dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+
+		<!-- Package the Newtonsoft.Json dependency alongside the generator assembly -->
+		<None Include="$(PkgNewtonsoft_Json)\lib\netstandard2.0\*.dll" Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
+	</ItemGroup>
+	
 	<ItemGroup>
 		<PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.2.0" PrivateAssets="all" />
 		<PackageReference Include="Microsoft.CodeAnalysis.Analyzers" Version="3.3.4" PrivateAssets="all" />
