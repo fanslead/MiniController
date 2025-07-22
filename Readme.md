@@ -457,13 +457,15 @@ public record UpdateUserRequest(string Name);
 ### 静态类模式
 - **优点**: 性能更高，启动更快
 - **缺点**: 仅支持方法级别依赖注入，不支持构造函数注入
-- **适用场景**: 简单的 API、工具类、无状态操作
+- **适用场景**: 依赖注入类容少的，减少方法注入膨胀
+``` csharp
 [MiniController("/api/simple")]
 public static class SimpleController
 {
     [HttpGet("ping")]
     public static IResult Ping() => Results.Ok("pong");
 }
+```
 ### 实例类模式
 - **优点**: 支持完整依赖注入，更好的测试性，支持复杂业务逻辑
 - **缺点**: 轻微的性能开销
