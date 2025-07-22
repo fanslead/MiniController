@@ -36,7 +36,7 @@ MiniController 是一个基于 Roslyn Source Generator 的 .NET Standard 2.0 端
 - **HTTP 方法推断**: 自动从方法名推断 HTTP 方法（Get、Post、Put、Delete、Patch 等）
 - **一键注册**: 自动生成 `MapMiniController` 扩展方法，一行代码注册所有端点
 - **静态和实例类支持**: 支持静态类和实例类两种模式
-- **自动依赖注入**: 自动生成 `AddMiniControllers` 扩展方法，支持依赖注入
+- **自动依赖注入**: 自动生成 `AddMiniControllers` 扩展方法，支持依赖注入，静态方法支持方法级别依赖注入
 - **智能参数绑定**: 支持 `[FromServices]`、`[FromRoute]`、`[FromQuery]` 等参数绑定特性
 - **路由冲突检测**: 编译时检测路由冲突，提供诊断信息
 
@@ -74,7 +74,7 @@ public static class DemoController
     public static IResult Hello() => Results.Ok("Hello World");
 
     [HttpGet("user/{id}")]
-    public static IResult GetUser(int id) => Results.Ok($"User {id}");
+    public static IResult GetUser(int id, IUserService userService) => Results.Ok(userService.Get(id));
 
     [HttpPost("user")]
     public static IResult CreateUser() => Results.Created("/api/demo/user/1", new { Id = 1 });
