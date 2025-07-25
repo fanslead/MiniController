@@ -1,0 +1,11 @@
+@SampleAotApi_HostAddress = http://localhost:5224
+
+GET {{SampleAotApi_HostAddress}}/todos/
+Accept: application/json
+
+###
+
+GET {{SampleAotApi_HostAddress}}/todos/1
+Accept: application/json
+
+###
