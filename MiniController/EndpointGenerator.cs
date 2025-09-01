@@ -48,31 +48,24 @@ public class EndpointGenerator : IIncrementalGenerator
 
     private static bool IsEndpointGroupClass(SyntaxNode node)
     {
-        if (node is not ClassDeclarationSyntax classDecl)
-            return false;
-
-        foreach (var attrList in classDecl.AttributeLists)
-        {
-            foreach (var attr in attrList.Attributes)
-            {
-                var attrName = attr.Name.ToString().AsSpan();
-                if (attrName.Equals("MiniController".AsSpan(), StringComparison.Ordinal) ||
-                    attrName.Equals("MiniControllerAttribute".AsSpan(), StringComparison.Ordinal))
-                {
-                    return true;
-                }
-            }
-        }
-        return false;
+        // 对于类声明语法节点，我们总是返回true，让transform阶段进行语义检查
+        // 这是因为继承的attribute检测需要语义模型，无法在语法层面完成
+        return node is ClassDeclarationSyntax;
     }
 
     private EndpointGroupClass? GetEndpointGroupClass(GeneratorSyntaxContext context)
     {
         var classDecl = (ClassDeclarationSyntax)context.Node;
         var model = context.SemanticModel;
-        var classSymbol = model.GetDeclaredSymbol(classDecl);
+        var classSymbol = model.GetDeclaredSymbol(classDecl) as INamedTypeSymbol;
 
         if (classSymbol == null)
+        {
+            return null;
+        }
+
+        // 检查类是否具有MiniControllerAttribute（包括继承的）
+        if (!HasMiniControllerAttribute(classSymbol))
         {
             return null;
         }
@@ -101,31 +94,79 @@ public class EndpointGenerator : IIncrementalGenerator
         };
     }
 
+    /// <summary>
+    /// 检查类是否具有MiniControllerAttribute（包括继承的）
+    /// </summary>
+    private static bool HasMiniControllerAttribute(INamedTypeSymbol classSymbol)
+    {
+        // 检查当前类及其所有基类是否有MiniControllerAttribute
+        var currentType = classSymbol;
+        while (currentType != null)
+        {
+            foreach (var attr in currentType.GetAttributes())
+            {
+                var attrName = attr.AttributeClass?.Name;
+                if (attrName == HttpConstants.MiniControllerAttributeName)
+                {
+                    return true;
+                }
+            }
+            currentType = currentType.BaseType;
+        }
+        return false;
+    }
+
     private ControllerMetadata ExtractControllerMetadata(ISymbol classSymbol, ClassDeclarationSyntax classDecl)
     {
         var metadata = new ControllerMetadata();
 
-        foreach (var attr in classSymbol.GetAttributes())
+        // 检查当前类及其所有基类的属性
+        var currentType = classSymbol as INamedTypeSymbol;
+        while (currentType != null)
         {
-            var attrName = attr.AttributeClass?.Name;
-            if (attrName == null) continue;
-
-            switch (attrName)
+            foreach (var attr in currentType.GetAttributes())
             {
-                case HttpConstants.MiniControllerAttributeName:
-                    metadata.RoutePrefix = ExtractRoutePrefix(attr, classDecl, classSymbol);
-                    metadata.FilterType = AttributeHelper.ExtractControllerFilterType(attr);
-                    break;
-                case HttpConstants.AuthorizeAttributeName:
-                    metadata.Authorize = AttributeHelper.ExtractAuthorizeMetadata(attr);
-                    break;
-                case HttpConstants.AllowAnonymousAttributeName:
-                    metadata.Authorize = new AuthorizeMetadata { AllowAnonymous = true };
-                    break;
-                case HttpConstants.ApiExplorerSettingsAttributeName:
-                    metadata.ApiExplorerSettings = AttributeHelper.ExtractApiExplorerSettings(attr);
-                    break;
+                var attrName = attr.AttributeClass?.Name;
+                if (attrName == null) continue;
+
+                switch (attrName)
+                {
+                    case HttpConstants.MiniControllerAttributeName:
+                        // 只有当RoutePrefix还未设置时才设置（优先使用派生类的设置）
+                        if (string.IsNullOrEmpty(metadata.RoutePrefix))
+                        {
+                            metadata.RoutePrefix = ExtractRoutePrefix(attr, classDecl, classSymbol);
+                        }
+                        // 只有当FilterType还未设置时才设置（优先使用派生类的设置）
+                        if (metadata.FilterType == null)
+                        {
+                            metadata.FilterType = AttributeHelper.ExtractControllerFilterType(attr);
+                        }
+                        break;
+                    case HttpConstants.AuthorizeAttributeName:
+                        // 只有当Authorize还未设置时才设置（优先使用派生类的设置）
+                        if (metadata.Authorize == null)
+                        {
+                            metadata.Authorize = AttributeHelper.ExtractAuthorizeMetadata(attr);
+                        }
+                        break;
+                    case HttpConstants.AllowAnonymousAttributeName:
+                        // 只有当Authorize还未设置时才设置（优先使用派生类的设置）
+                        if (metadata.Authorize == null)
+                        {
+                            metadata.Authorize = new AuthorizeMetadata { AllowAnonymous = true };
+                        }
+                        break;
+                    case HttpConstants.ApiExplorerSettingsAttributeName:
+                        // 只有当ApiExplorerSettings还未设置时才设置（优先使用派生类的设置）
+                        if (metadata.ApiExplorerSettings == null)
+                        {
+                            metadata.ApiExplorerSettings = AttributeHelper.ExtractApiExplorerSettings(attr);
+                        }
+                        break;
+                }
             }
+            currentType = currentType.BaseType;
         }
 
         return metadata;
