@@ -139,7 +139,7 @@ public static class SourceCodeGenerator
             }
             else
             {
-                source.Append($".WithTags(\"{endpointGroup.ClassName}\").WithOpenApi()");
+                source.Append($".WithTags(\"{endpointGroup.ClassName}\")");
             }
 
             // 添加响应类型
@@ -315,7 +315,7 @@ public static class SourceCodeGenerator
         }
         else
         {
-            source.Append($".WithTags(\"{endpointGroup.ClassName}\").WithOpenApi()");
+            source.Append($".WithTags(\"{endpointGroup.ClassName}\")");
         }
 
         // 添加响应类型
@@ -468,10 +468,6 @@ public static class SourceCodeGenerator
         if (settings.IgnoreApi == true)
         {
             result.Append(".ExcludeFromDescription()");
-        }
-        else
-        {
-            result.Append(".WithOpenApi()");
         }
 
         if (!string.IsNullOrEmpty(settings.GroupName))
